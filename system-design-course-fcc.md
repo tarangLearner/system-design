@@ -5,6 +5,8 @@
 >
 > **What the video actually covers** (despite the title): Foundations → Scaling → Load Balancing → API Design → API Protocols → TCP/UDP → REST → GraphQL → AuthN → AuthZ → API Security.
 > The remaining roadmap modules — **databases at scale, caching, CDNs, big data, production infra, interview technique** — are *announced in this video* but deferred to the author's own channel. They're written up in full in **[PART II](#part-ii--the-rest-of-the-roadmap)**.
+>
+> **Dedicated deep dives in this repo:** [networking.md](networking.md) · [databases.md](databases.md) · [caching.md](caching.md) · [load-balancer.md](load-balancer.md) · [rest-api.md](rest-api.md) · [distributed-systems.md](distributed-systems.md) · [system-design-interview-playbook.md](system-design-interview-playbook.md) · [README.md](README.md)
 
 ---
 

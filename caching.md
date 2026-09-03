@@ -7,6 +7,7 @@
 >
 > **Purpose:** Interview prep. Every section = concept → flow chart → problem → solution.
 > **Companion:** [cache-aside-lld.md](cache-aside-lld.md) — low-level design + Python / TypeScript / JavaScript implementations.
+> **Related notes in this repo:** [cache.md](cache.md) (quick reference) · [databases.md](databases.md) · [load-balancer.md](load-balancer.md) · [DNS.md](DNS.md) · [latency.md](latency.md) · [data-structure.md](data-structure.md) (LRU, bloom filters, consistent hashing) · [distributed-systems.md](distributed-systems.md) (CDC-driven invalidation) · [README.md](README.md)
 
 ---
 

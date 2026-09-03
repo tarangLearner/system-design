@@ -2,6 +2,8 @@
 
 > Source: ByteByteGo — *Cache Systems Every Developer Should Know* (YouTube: `dGAgxozNWFE`)
 > Interview-prep summary
+>
+> **Go deeper in this repo:** [caching.md](caching.md) (full HLD masterclass) · [cache-aside-lld.md](cache-aside-lld.md) (runnable LLD) · [databases.md](databases.md) · [load-balancer.md](load-balancer.md) · [data-structure.md](data-structure.md) (LRU, bloom filters, consistent hashing) · [README.md](README.md)
 
 ![alt text](image.png)
 

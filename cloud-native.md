@@ -2,6 +2,8 @@
 
 Source video: ByteByteGo (What is Cloud Native?)
 
+> **Related notes in this repo:** [distributed-systems.md](distributed-systems.md) (service discovery, consensus, resilience patterns, observability) · [high-level-system-design-cocept.md](high-level-system-design-cocept.md) (architectural patterns) · [networking.md](networking.md) · [databases.md](databases.md) · [system-design-interview-playbook.md](system-design-interview-playbook.md) · [README.md](README.md)
+
 ## 1. Core Message of the Video
 
 Cloud Native is not just about running software in the cloud. It is a blueprint for building web-scale systems that are:

@@ -7,6 +7,8 @@
 > 4. **ByteByteGo** — *What Is GraphQL? REST vs. GraphQL* (`yWzKJPw_VzM`) — GraphQL trade-offs at scale
 >
 > Full course notes: [system-design-course-fcc.md](system-design-course-fcc.md)
+>
+> **Related notes in this repo:** [rest-api.md](rest-api.md) (REST design, idempotency, rate limiting, security) · [networking.md](networking.md) (HTTP/1.1→3, TLS, WebSockets) · [grpc-architecture-kt.md](grpc-architecture-kt.md) (gRPC in a real polyglot product) · [README.md](README.md)
 
 ---
 

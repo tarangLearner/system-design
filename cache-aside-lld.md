@@ -2,6 +2,7 @@
 
 > Companion to [caching.md §8.1](caching.md). Production-shaped implementations in **Python**, **TypeScript**, and dependency-free **JavaScript** (whiteboard version).
 > **Goal:** be able to *design the classes*, *write the code*, and *defend every line* in an LLD/system-design round.
+> **Related notes in this repo:** [low-level-design.md](low-level-design.md) (OOP, SOLID, UML, the LLD framework) · [design-patterns.md](design-patterns.md) · [concurrency.md](concurrency.md) (single-flight, locks, thread-safe caches) · [data-structure.md](data-structure.md) (LRU internals) · [README.md](README.md)
 
 ---
 
