@@ -15,7 +15,7 @@
 > 10. [Medium — System Design **Mock Interview**: Load Balancing (Yash Marathe)](https://medium.com/system-design-interviews-simplified/system-design-mock-interview-load-balancing-0541de44f819) — the 8-round interview transcript, the "trick question" (sticky sessions vs auto-scaling), the restaurant analogy, and the design-pitfalls list
 > 11. Production references: Google **Maglev** paper, Meta **Katran/Shiv**, Cloudflare **Unimog**, **Envoy** docs, **HAProxy/NGINX** docs, **Amazon Builders' Library — Implementing Health Checks**
 >
-> **Companion notes in this repo:** [caching.md](caching.md) · [DNS.md](DNS.md) · [latency.md](latency.md) · [rest-api.md](rest-api.md) · [high-level-system-design-cocept.md](high-level-system-design-cocept.md)
+> **Companion notes in this repo:** [caching.md](caching.md) · [DNS.md](DNS.md) · [latency.md](latency.md) · [rest-api.md](rest-api.md) · [high-level-system-design-cocept.md](high-level-system-design-cocept.md) · [networking.md](networking.md) · [databases.md](databases.md) · [distributed-systems.md](distributed-systems.md) · [system-design-interview-playbook.md](system-design-interview-playbook.md) · [README.md](README.md)
 
 ---
 
