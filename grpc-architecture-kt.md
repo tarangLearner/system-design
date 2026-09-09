@@ -664,3 +664,39 @@ Useful: `grpcurl -plaintext localhost:49494 list` **will not work** — reflecti
 5. **Large protobuf/grpc version gap** between Java (2021-era) and Python (current). Works today; constrains proto language features.
 6. **Default 4 MB max message size** is unconfigured. Safe only because we pass file paths. Any future change that inlines data must revisit this.
 7. **Unbounded Python thread pool** — no backpressure if request volume spikes.
+
+---
+
+## Appendix D — Industry reference point: gRPC at Uber scale
+
+> **Source:** Uber Engineering — *[Accelerating Search and Ingestion with High-Performance gRPC in OpenSearch](https://www.uber.com/in/en/blog/high-performance-grpc/)* (Apr 2026). Full write-up in [restvsgraphqlVsRPC.md §19](restvsgraphqlVsRPC.md#19-real-world-case-study--uber-adds-native-grpc-to-opensearch).
+>
+> Useful here for two reasons: it **quantifies** the "why gRPC" argument in [§1.2](#12-what-we-considered-and-why-grpc-won-for-these-hops), and several of the backlog items in Appendix C are things Uber had to solve at scale.
+
+### D.1 The measured wins
+
+| Workload | Metric | REST/JSON → gRPC |
+|---|---|---|
+| Metrics ingest (Bulk API) | p99 write latency | 34.1 ms → 13.6 ms (**−60%**) |
+| Metrics ingest (Bulk API) | p50 write latency | 15.8 ms → 10.5 ms (**−34%**) |
+| Batch indexing (Spark jobs) | Job runtime | **−20–35%** |
+| Vector search | p50 | 83 ms → 38 ms (**−53%**) |
+| Vector search | p99 | 205 ms → 176 ms (**−14%**) |
+
+**Request size, 1,572-dimension vector query:** 40,523 B (JSON) → 4,590 B (Protobuf) = **88.7% smaller**. Floats are the worst case for JSON: 4 packed bytes vs a dozen-plus characters that must then be parsed.
+
+**Transport and encoding are separate wins.** gRPC + SMILE (binary JSON) was **45% faster than gRPC + JSON** (pure encoding effect) and **47% faster than REST + SMILE** (pure transport effect). Worth knowing when someone asks "is it HTTP/2 or protobuf that's helping?"
+
+**Uber's summary of where gRPC wins:** large request sizes · higher throughput at high RPS · binary document formats. Their p99 search only improved 14% *"due to long-tail large queries"* — the benefit is proportional to payload size, and it doesn't fix a slow backend.
+
+### D.2 Three practices worth adopting here
+
+| Uber practice | Relevance to our stack |
+|---|---|
+| **Kill the translation layer.** Their Search Gateway used to transpile Protobuf→JSON and back on every request; native gRPC let them delete it and pass Protobufs straight through | Directly relevant to Appendix C item 1 — **duplicated protos with no automated sync** is a translation problem waiting to happen. One shared package, generated once |
+| **Automate IDL generation and gate compatibility in CI.** A three-stage pipeline (preprocess → convert → postprocess) regenerates Protobufs from the API spec, and *"performs compatibility checks against previously generated Protobufs"* because *"Protobuf APIs can't tolerate changes such as field renumbering without breaking existing clients"* | The strongest answer to the standard objection to RPC ("stub regeneration on every change"). A `buf breaking` check in CI is the cheap version of this |
+| **Run both transports side by side on different ports.** gRPC ships as a **module** alongside REST; *"only the client-server layer differs… the internal node-to-node logic remains shared"*, so teams migrate incrementally | The migration pattern to use if any of our hops ever needs a REST fallback for browser or third-party clients |
+
+### D.3 What to say in a KT / interview
+
+> *"gRPC's value isn't 'it's faster' in the abstract — the gain is proportional to payload size and request rate. Uber published the cleanest numbers I know of: 60% lower p99 on high-throughput ingestion and ~85–89% smaller request bodies for vector payloads, because JSON encodes floats as text. In our system the same reasoning applies to the image-transform and analysis hops, where the alternative would have been JSON over HTTP/1.1 with a translation layer on both sides. The two operational lessons I'd take from them are: generate the stubs from a single source of truth and gate wire compatibility in CI, and keep the option of running a second transport on separate ports so a migration never has to be a flag day."*

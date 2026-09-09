@@ -41,6 +41,7 @@ low level system design - its more about coding, how coding is going to happen
 | 10 | **Extensibility & evolvability** (expanding point 10) | [§10](#10-extensibility-expanding-point-10) |
 | 11 | The 20 core terms — one-line definitions | [§11](#11-the-glossary-you-should-be-able-to-recite) |
 | ★ | Rapid-fire Q&A | [§12](#12-rapid-fire-qa) |
+| ★ | 🏭 **Real-world: these concepts at Uber and LinkedIn scale** | [§13](#13-real-world-case-studies--the-core-concepts-at-uber-and-linkedin-scale) |
 
 ---
 
@@ -441,3 +442,151 @@ flowchart LR
 | **What should you alert on?** | User-facing symptoms (error rate, p99 latency, business metrics), not causes like CPU. |
 | **How do you make an architecture extensible?** | Versioned contracts, event-driven producers, plugin/strategy seams for volatile rules, feature flags, and backward-compatible schemas — placed where change is *likely*, not everywhere. |
 | **What is Conway's Law and why does it matter?** | System structure mirrors org structure. A service boundary that cuts across a team boundary will always be painful, so design them together. |
+
+---
+
+## 13. Real-World Case Studies — the core concepts at Uber and LinkedIn scale
+
+> **Sources:** Uber — *[CacheFront](https://www.uber.com/en-US/blog/how-uber-serves-over-40-million-reads-per-second-using-an-integrated-cache/)*, *[Intelligent load management](https://www.uber.com/in/en/blog/from-static-rate-limiting-to-intelligent-load-management/)* · LinkedIn — *[Northguard and Xinfra](https://www.linkedin.com/blog/engineering/infrastructure/introducing-northguard-and-xinfra)*.
+>
+> Every concept in this file shows up in these three posts. This section is the "here's what it looks like when it's real" layer.
+
+### 13.1 Scalability isn't only about data — the control plane scales too
+
+LinkedIn's Kafka fleet: **32 trillion records/day, 17 PB/day, 400K topics, 10,000+ machines, 150 clusters.** But read their actual problem statement:
+
+> *"Onboarding more use cases not only resulted in more traffic, but also **more metadata**, and more machines to support the added traffic. **Metadata and cluster size bottlenecks** were getting harder to tackle and meant setting up more clusters."*
+>
+> *"We needed a system that scales well not just in terms of data, but also **in terms of its metadata and cluster size**."*
+
+| Axis of scale | Kafka | Northguard |
+|---|---|---|
+| **Data** | A log is bounded by **one machine's** disk | A log is bounded by the **cluster's** disk |
+| **Metadata / control plane** | **1** controller, **1** replicated state machine — stressed at millions of partition replicas | **128+** coordinators, **128+** sharded Raft state machines |
+| **Metadata distribution** | Global topic metadata state on every broker | **Minimal** global state |
+| **Membership** | Centralised heartbeating to the controller | Gossip (SWIM) |
+| **Operations** | An external service (Cruise Control) to keep the cluster balanced | **Balanced by design**; adding a broker moves no existing data |
+
+> ⭐ **Say this:** *"When people say 'it scales', they usually mean the data plane. The thing that actually caps a system is often the control plane — the one leader that owns cluster metadata, the config store everyone reads at startup, the service registry. I'd ask what happens to metadata volume and coordination cost at 10× before I ask about storage."*
+
+This extends [§1](#1-scalability): horizontal scaling requires statelessness in the data path **and** a control plane that doesn't have a single coordinator.
+
+### 13.2 Availability vs consistency — a real, named trade-off
+
+The cleanest CAP/PACELC example you'll find, because LinkedIn states the mechanism, not the theory:
+
+> Kafka: *"Availability — limited by **partitions being a heavyweight unit for replication**. Consistency — **was often traded off in favor of availability** due to the availability impact of partitions being the unit of replication."*
+>
+> Northguard: *"**Segments** as the unit of replication and log striping means that we **don't need to sacrifice consistency** in order to preserve produce availability when brokers start to fail."*
+
+```mermaid
+flowchart TD
+    A["Coarse replication unit<br/>(whole partition)"] --> B[Replica failure = long,<br/>expensive catch-up]
+    B --> C{"Produce during<br/>the catch-up?"}
+    C -->|"Block → unavailable"| D[Consistency preserved,<br/>availability lost]
+    C -->|"Accept → under-replicated"| E[Availability preserved,<br/>consistency sacrificed]
+    F["Fine replication unit<br/>(1 GB segment)"] --> G[Producer simply rolls<br/>onto a NEW segment<br/>on healthy brokers]
+    G --> H[Both preserved]
+
+    style E fill:#f8cecc
+    style H fill:#d5e8d4
+```
+
+> ⭐ **The senior move:** they didn't *choose a side* of CAP — they **changed the granularity of the thing being replicated** so the choice stopped being forced. When you're stuck picking between two bad options, the question to ask is *"what design decision is creating this dilemma?"*
+
+**Durability, expressed as a number** ([§2](#2-availability-reliability--durability)):
+
+| System | Guarantee |
+|---|---|
+| Kafka at LinkedIn | **Lazy syncs** — 10 seconds / 20k records |
+| Northguard | **`fsync` on all replicas before the produce ack** — 10 ms / 20k records / 10 MB |
+
+### 13.3 Redundancy has a price tag — say the number
+
+Uber's blunt line on why they cached instead of scaling Docstore:
+
+> *"Costs are **multiplied 6×** to handle each of the 3 stateful nodes across both regions."*
+
+| Choice | Multiplier |
+|---|---|
+| Replication factor 3 (leader + 2 followers, Raft) | **×3** |
+| Active-active across 2 regions | **×2** |
+| **Total** | **×6 on every unit of capacity you add** |
+
+> ⭐ **Say this:** *"Redundancy is a multiplier on your cost base, not a line item. Before I add a region I'd want to know the RTO/RPO the business actually needs, because active-active doubles the price of every capacity decision I make afterwards — forever."* → [§5](#5-redundancy-failover--fault-tolerance)
+
+### 13.4 Failover is only real if the standby is warm
+
+Docstore runs **active-active across two regions**: *"requests can be issued and served in any region and all writes are replicated across regions. In case of a region failover, another region must be able to serve all requests."*
+
+The failure mode they had to design around is the one most candidates forget:
+
+> *"If [caches] are not [warm], a region fail-over will increase the number of requests to the database due to cache misses from the traffic originally served in the failed region. **This will prevent us from scaling down the storage engine and reclaiming any capacity, since the database load would be as high as it would have been without any caching.**"*
+
+That sentence contains a trap worth internalising: **the moment you size your database on the assumption that a cache absorbs the load, the cold cache after failover becomes a capacity emergency.** Their fix is elegant:
+
+| Naive fix | Their fix |
+|---|---|
+| Cross-region **Redis replication** | Tail the Redis write stream and replicate **keys, not values**, to the remote region. The remote region issues a *read* through its own query engine; the miss populates the cache from **its own local database**; the response is discarded |
+| **Problem:** two independent replication mechanisms (Docstore's and Redis's) can disagree → cache/storage inconsistency | **Benefit:** each region's cache is by construction consistent with *its own* database, the same working set stays hot in both regions, and cross-region bandwidth stays small |
+
+> ⭐ **Say this:** *"Untested failover doesn't work, and warm failover is a design requirement, not an operational one. If a cache is load-bearing, the standby region's cache is part of your capacity plan — I'd replicate cache **keys** rather than values so each region populates from its own source of truth and the two replication paths can't diverge."* → [§5](#5-redundancy-failover--fault-tolerance)
+
+### 13.5 Graceful degradation, made concrete
+
+[§5 graceful degradation](#5-redundancy-failover--fault-tolerance) usually gets a hand-wavy answer. Uber's load manager is what it looks like implemented:
+
+| Tier | Traffic | Fate under overload |
+|---|---|---|
+| **t0** | A small set of critical infrastructure services | Protected |
+| **t1** | The most important user-facing online traffic | Protected |
+| … | … | … |
+| **t5** | Pipelines, aggregators, internal garbage collection | **Shed first** |
+
+> *"Many overloads stemmed from low-priority, asynchronous jobs… These shouldn't have the same survivability as ride requests or real-time pricing queries."*
+
+**The degradation order is a design-time decision encoded in the request itself** — and requests without an explicit priority get a default derived from the calling service, so nothing is unclassified. Add **per-tenant concurrency caps** on top ("Scorecard") and you get **blast-radius control**: *"it isolates and caps misbehaving tenants without disrupting others… reduces blast radius during overload events."*
+
+### 13.6 SPOFs hide in the thing you added to prevent failure
+
+Uber's first overload-protection design put a quota counter in a central Redis, checked on every request:
+
+> *"Every request required a Redis call, **introducing a new point of failure** and the overhead of an additional network hop."*
+
+The protective mechanism became a **SPOF in the hot path of 100% of traffic** ([§3](#3-single-point-of-failure-spof)). Two structural fixes they landed on:
+
+1. **Move the control next to the state** — *"overload management must live as close to the storage nodes as possible"*, so the decision needs no extra hop and has full context.
+2. **Shard the dependency on a different key than the thing it protects** — CacheFront shards Redis by **partition key**, deliberately *not* Docstore's sharding scheme, so *"all requests from a failed Redis shard will be distributed among all database shards"* instead of concentrating on one. **Correlated failure is the thing that turns redundancy into theatre**, and this is a rare, concrete example of engineering *away* the correlation.
+
+### 13.7 Decoupling via a log — one pipeline, many consumers
+
+Uber's **Flux** tails the MySQL binlog of every Docstore cluster and publishes events. That single pipeline powers:
+
+> CDC · cross-region replication · materialized views · data-lake ingestion · cross-node consistency validation · **cache invalidation**
+
+That's [§6 decoupling](#6-decoupling-expanding-point-8) at its most economical: the producer (MySQL) knows nothing about any consumer, and adding a seventh derived system costs one new subscriber rather than one new write path in the application. It also removes an entire class of bug — because the log contains only **committed** transactions, *"we don't run the risk of letting uncommitted transactions pollute the cache."*
+
+### 13.8 Extensibility, as actually built
+
+[§10 extensibility](#10-extensibility-expanding-point-10) says put seams where change is *likely*. Three production examples:
+
+| System | The seam | What it bought |
+|---|---|---|
+| Uber's load manager | **BYOS — "Bring Your Own Signal"**: a pluggable framework for new overload signals routed to the right control path | The next overload signal (e.g. follower commit lag) is a plug-in, not a redesign |
+| Northguard | **Attributes + policies**: brokers carry arbitrary key/value attributes; storage and metadata policies contain constraint expressions over them | Northguard has *no native concept of racks or datacenters* — LinkedIn encodes that in policy, and gets rack-aware placement **and** constant-time safe deploys from the same abstraction |
+| OpenSearch gRPC | An **SPI** so plugins can register their own Proto↔object converters and their own gRPC services | Plugins extend the transport without forking core |
+
+> ⭐ Notice the pattern in all three: the seam is **data-driven configuration over a small generic mechanism**, not an inheritance hierarchy. That's the difference between extensibility and speculative abstraction.
+
+### 13.9 The numbers to carry into an interview
+
+| Fact | Number |
+|---|---|
+| LinkedIn members, 2010 → today | 90 M → **1.2 B+** |
+| LinkedIn Kafka volume | **32 T records/day**, 17 PB/day, 400K topics, 150 clusters |
+| Cluster count after Northguard | **80%+ fewer** |
+| Uber Docstore scale | Tens of PB, tens of millions req/sec, thousands of clusters |
+| Uber monthly active users | **170 M+** |
+| Cost multiplier of RF3 × 2 regions | **6×** |
+| CacheFront: DB cores vs cache cores for 6M RPS | ~60K → ~**3K** |
+| Overload protection: PID shedder vs token bucket | **+80%** throughput, **−70%** p99, **−93%** goroutines |

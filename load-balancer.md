@@ -57,6 +57,7 @@
 | **★** | Anti-patterns & red flags | [§23](#23-anti-patterns--interview-red-flags) |
 | **★** | Config cheat sheet — NGINX · HAProxy · Envoy · Kubernetes | [§24](#24-config-cheat-sheet) |
 | **★** | Principal-engineer signal checklist | [§25](#25-the-principal-engineer-signal-checklist) |
+| **★** | 🏭 **Real-world case study** — Uber's load manager: CoDel → Cinnamon → PID shedding | [§26](#26-real-world-case-study--ubers-load-manager-static-rate-limits--priority-aware-shedding) |
 
 ---
 
@@ -2096,3 +2097,166 @@ Tick these off during the interview — each one is a distinct seniority signal.
 
 > **Final one-liner to leave the interviewer with:**
 > *"A load balancer is not a box that spreads requests — it's the **control point where availability, latency, cost, and blast radius are traded against each other**. The algorithm is the least interesting part; the health semantics, the failure behaviour, and the safety of changing its configuration are what decide whether the system stays up."*
+
+---
+
+## 26. Real-World Case Study — Uber's Load Manager (static rate limits → priority-aware shedding)
+
+> **Source:** Uber Engineering — *[How Uber Conquered Database Overload: The Journey from Static Rate-Limiting to Intelligent Load Management](https://www.uber.com/in/en/blog/from-static-rate-limiting-to-intelligent-load-management/)* (Apr 2026).
+>
+> This is the production version of [§13 Overload & Resilience](#13-overload--resilience-principal-engineer-territory). Uber runs **Docstore** and **Schemaless** — MySQL-backed distributed databases across thousands of clusters, tens of PB, tens of millions of req/sec, backing 170M+ monthly active users. At that scale *"even minor overloads aren't isolated events — they cascade."*
+
+### 26.1 Attempt 1: quota-based rate limiting at the routing layer — **it failed**
+
+The obvious design, and the one most candidates propose:
+
+> Assign each request a *capacity unit cost* based on bytes processed → give each tenant a fixed quota → return **429** when exceeded → store quota counters in a central Redis because the routing layer is stateless.
+
+```mermaid
+flowchart LR
+    C[Clients] --> QE[Stateless query engine<br/>quota check]
+    QE <-->|every request| RD[(Central Redis<br/>quota counters)]
+    QE --> SE[Storage engine<br/>1000s of partitions]
+
+    style RD fill:#f8cecc
+```
+
+Four reasons it did not survive production — **memorise these, they are the strongest critique of naive rate limiting you can give:**
+
+| # | Failure | Why it matters |
+|---|---|---|
+| **1** | **A Redis call on every request** | A brand-new SPOF plus an extra network hop, in the hot path, to protect against a problem that hasn't happened yet |
+| **2** | **The stateless layer doesn't know who's hurting** | To shed for an *overloaded partition*, the routing tier would have to track realtime health and load for **thousands of partitions**. That tracking overhead destroys the scalability of a stateless tier |
+| **3** | **The cost model was a lie** | In MySQL, a query that **full-table-scans and returns one row** was billed the same as a query that reads one row. Lightweight and heavyweight work were metered identically, so the quota meant nothing |
+| **4** | **Static quotas** | Constant stakeholder tickets to raise limits; useless in a multitenant environment where the right number changes hourly |
+
+> ⭐ **The cornerstone insight:** ***overload management must live as close to the storage nodes as possible*** — i.e. in the layer that actually holds the state and therefore has full context. Shedding at the edge is guessing.
+
+### 26.2 Picking the right overload signal — concurrency, not QPS
+
+| Signal | Verdict |
+|---|---|
+| **QPS** | Too coarse. Blind to workload variability, so it sheds too late or too early |
+| **Concurrency** (operations currently in flight) | ✅ Directly reflects load and maps closely to resource usage in a stateful system |
+
+$$\text{Concurrency} = \text{Throughput} \times \text{Latency}$$
+
+That's **Little's Law** again ([§21](#21-the-interview-framework), [latency.md §7](latency.md#7-throughput-littles-law--why-queues-explode)). It's the same formula you use to *size* a pool — here it's used to *detect* that the pool is drowning. When latency rises at constant throughput, concurrency rises automatically: the signal is self-tuning in a way a QPS threshold never is.
+
+### 26.3 v1 — CoDel queues + Scorecard + regulators
+
+**CoDel (Controlled Delay)**, borrowed from networking's bufferbloat problem, sheds based on **how long a request has waited**, not on queue length.
+
+Three isolated queues, so one workload class can't starve another:
+
+| Queue | Traffic |
+|---|---|
+| **Read** | Point lookups, light queries |
+| **Write** | Insert / update / upsert |
+| **Slow** | Scans, deletes, background jobs, replication |
+
+**The adaptive-LIFO trick — the part worth remembering:**
+
+```mermaid
+flowchart TD
+    A[Normal load] --> B[Queue behaves FIFO<br/>fair, ordered]
+    C[Overload] --> D[Queue switches to LIFO<br/>serve the newest requests first]
+    D --> E["Old requests have already<br/>been abandoned or retried<br/>→ serving them is wasted work"]
+    D --> F["Fresh requests still have<br/>a caller waiting<br/>→ they can still succeed"]
+
+    style C fill:#f8cecc
+    style D fill:#d5e8d4
+```
+
+> Pure FIFO is a trap under overload: stale requests accumulate at the head, get abandoned or retried by the client, and you burn capacity producing answers nobody is listening for — while fresh, still-winnable requests wait at the back. **CoDel flips to LIFO under pressure.**
+
+Two companion mechanisms:
+
+- **Scorecard** — rule-based admission control enforcing **per-tenant concurrency limits**. Load shedding protects the system *during* overload; Scorecard stops one tenant dominating shared infrastructure *at any time*. Its real value is **incident containment**: it pinpoints and caps the noisy neighbour without punishing everyone else — deterministic **blast-radius control** ([§13](#13-overload--resilience-principal-engineer-territory)).
+- **Regulators** — node-local detectors for overload shapes that concurrency can't see. A low-QPS caller sending huge writes, or traffic skewed onto one partition key, will never saturate concurrency but will still take the node down:
+
+| Regulator | Guards against |
+|---|---|
+| **Write-bytes** | I/O saturation from large payloads at low QPS |
+| **Partition key** | Hot-key / hot-shard skew |
+| **Memory** | OOM from queued work |
+| **Goroutines** | Runaway concurrency in the Go runtime |
+
+**Where v1 fell down:**
+
+| Limitation | Consequence |
+|---|---|
+| CoDel is **priority-agnostic** | A background aggregator and a live ride request were dropped with equal enthusiasm → customer-visible errors |
+| **Fixed** queue timeouts + **static** inflight limits | Low fidelity for a dynamic system; permanent manual tuning toil |
+| Fixed wait times → **synchronised rejection** | Everyone retried at the same instant → **thundering herd** → overload/reject cycles |
+
+### 26.4 v2 — Cinnamon: priority-aware shedding with a PID controller
+
+Most overload came from **low-priority asynchronous work** — pipelines, aggregators, internal GC flows — which *should not* have the same survivability as a ride request. So CoDel was replaced with **Cinnamon**, a priority-aware shedder.
+
+| Mechanism | Detail |
+|---|---|
+| **Request rank** | Derived from the request's priority; if absent, defaulted from the **calling service** |
+| **Tier model** | **t0** = a small set of critical infrastructure … **t1 = the most important user-facing online traffic** (the thing you're actually protecting) … down to **t5** = least important |
+| **Simplified queues** | Back to just **read** and **write**; background work no longer needs its own queue because it simply carries a lower priority |
+| **Adaptive timeout** | Queue timeout thresholds derived from **P90 latency** — no manual tuning |
+| **Auto Tuner** | Continuously adjusts the **inflight concurrency limit** from realtime latency and error-rate signals to maximise throughput |
+| **PID control** | Instead of "reject everything after a fixed 5 ms wait", a PID loop uses *history and trend* to shed gradually |
+
+> ⭐ **The best line in the post:** *"Without PID regulation, shedding acts like a hammer: reactive and abrupt. With it, it's more like a **dimmer switch**: smooth and stable."*
+>
+> This directly prevents **premature shedding** — the class of unnecessary rejections that trigger retries, which trigger more overload.
+
+### 26.5 v3 — one control loop, "Bring Your Own Signal"
+
+The remaining gap is a genuinely distributed-systems problem, and a great thing to raise unprompted:
+
+> **Overload is not always local.** A leader node can be perfectly healthy itself and still need to shed — because its **followers are lagging** (*commit index lag*). Its local signals say "I'm fine."
+
+Historically that was handled by *external* token-bucket rate limiters, which "were easy to build but proved ineffective at scale, introducing **split-brain behaviours** and globally suboptimal shedding decisions."
+
+The fix: make Cinnamon accept **pluggable external signals** (follower commit lag, and anything added later) inside the **same admission-control path** — one decision loop for local *and* remote pressure. That's the **BYOS (Bring Your Own Signal)** architecture: the platform routes each signal to the right control path — shed **broadly by priority** when the pressure is systemic, or **precisely by caller** when it's actor-specific.
+
+```mermaid
+flowchart TD
+    subgraph SIG["Signals (pluggable)"]
+        S1[Inflight concurrency]
+        S2[Write bytes]
+        S3[Memory / goroutines]
+        S4[Hot partition key]
+        S5[Follower commit lag<br/><i>remote</i>]
+    end
+    SIG --> CIN[Cinnamon<br/>single admission-control loop<br/>PID + request rank]
+    CIN -->|systemic pressure| B1[Shed broadly<br/>by priority tier]
+    CIN -->|actor-specific| B2[Shed precisely<br/>by caller / tenant]
+    CIN --> OK[Admit → storage engine]
+
+    style CIN fill:#d5e8d4
+    style S5 fill:#ffe6cc
+```
+
+### 26.6 The results — token bucket vs PID-based shedding
+
+| Metric | Before (token bucket) | After (Cinnamon) | Change |
+|---|---|---|---|
+| **Throughput under overload** | 3,000 QPS avg | 5,400 QPS avg | **+80%** |
+| **P99 latency (upsert)** | 3.1 s | 1.0 s | **≈ −70%** |
+| **Goroutines at overload peak** | 150,000 | 10,000 | **≈ −93%** |
+| **Heap usage** | 5–6 GB spikes | 1 GB max | **≈ −60%** |
+
+The mechanism behind all four numbers is one sentence: **Cinnamon rejects immediately instead of holding requests in memory**, so the goroutine and heap buildup that token-bucket limiters caused simply never happens.
+
+### 26.7 The seven lessons — quote these
+
+| Lesson | Why it's a seniority signal |
+|---|---|
+| **Prioritisation is paramount** | Shedding starts with deciding *what matters most*. Protect critical user-facing traffic; everything else is secondary |
+| **Fail fast, don't block** | Rejecting early beats holding requests until they expire — less wasted work, predictable latency, no OOM |
+| **PID regulation for stable shedding** | Reacting to current error rate alone overcorrects too late and too hard. Use history and trend |
+| **Place control close to the source of truth** | Shed in the layer that has full context — the storage layer in a stateful system |
+| **Embrace dynamism** | Avoid static configuration; the system should adapt to context |
+| **Invest in visibility** | Track *what* is shed, *why*, and how each component contributes to pressure |
+| **Simplicity over complexity** | The meta-principle behind all the others |
+
+> ⭐ **Say this when asked "how would you protect a service from overload?":**
+> *"I'd separate two problems. Fairness is per-tenant admission control — a concurrency cap per caller so one noisy neighbour can't take the shared resource, which also gives me deterministic blast-radius control during an incident. Resilience is load shedding, and I'd shed on **concurrency rather than QPS** because concurrency = throughput × latency, so it self-adjusts as the system slows. I'd make the queue **adaptive LIFO** — under overload the requests at the head are already abandoned, so serving them is wasted work. I'd make shedding **priority-aware**, because most overload comes from background jobs that should never compete with user-facing traffic. And I'd drive the inflight limit with a **PID controller** rather than a fixed threshold, because fixed thresholds cause synchronised rejection and a thundering herd of retries. Uber did exactly this — replacing token buckets with a PID-based priority-aware shedder gave them 80% more throughput under overload and 93% fewer goroutines. The last piece I'd add is a pluggable remote signal: a healthy leader still has to shed when its followers lag, and local health alone can't see that."*

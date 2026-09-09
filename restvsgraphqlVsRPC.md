@@ -761,3 +761,121 @@ This is exactly why **browser support is RPC's weak spot and REST/GraphQL's stre
 > RPC takes a different angle entirely — instead of modelling resources, it makes a remote call *look like a local function call*. You define the contract once in an IDL like protobuf, a stub generator emits client and server code in every language, and marshalling, retries, compression and multiplexing are all abstracted away. That gives you a very strong contract and big productivity wins, at the cost of stub regeneration on every signature change and limited browser support.
 >
 > In practice: REST or GraphQL at the edge for client compatibility and caching, gRPC between microservices for speed and strict contracts, WebSockets for real-time, and a message queue for async work."
+
+---
+
+## 19. Real-World Case Study — Uber adds native gRPC to OpenSearch
+
+> **Source:** Uber Engineering — *[Accelerating Search and Ingestion with High-Performance gRPC in OpenSearch](https://www.uber.com/in/en/blog/high-performance-grpc/)* (Apr 2026).
+>
+> This is the rare blog post that puts **hard numbers** on "REST/JSON vs gRPC/Protobuf" for the same workload, on the same system, in production. It's the best possible evidence for [§13 Decision matrix](#13-decision-matrix--when-to-pick-what) and [§14 Trade-offs](#14-trade-offs-to-name-out-loud-in-an-interview).
+
+### 19.1 The problem — a translation layer nobody wanted
+
+Uber's internal fleet already speaks **gRPC + Protobuf**: strongly typed contracts, binary serialization, streaming-friendly transport. But **OpenSearch historically exposed only REST/JSON**.
+
+So Uber's **Search Gateway** — the service that proxies every OpenSearch search and ingest request to add security, observability, rate limiting and auditing — had to run an in-house adaptor:
+
+```mermaid
+flowchart LR
+    U[Uber services] -->|HTTP/2<br/>gRPC + Protobuf| GW[Search Gateway]
+    subgraph GW2["Adaptor (the tech debt)"]
+        P2J[ProtoToJsonMapper]
+        J2P[JsonToProtoMapper]
+    end
+    GW --> GW2
+    GW2 -->|HTTP/1.1<br/>REST + JSON| OS[(OpenSearch cluster)]
+
+    style GW2 fill:#f8cecc
+```
+
+Every request was **transpiled Protobuf → JSON** on the way in and **JSON → Protobuf** on the way back. *"This added both latency and overhead to each customer's OpenSearch request."*
+
+> ⭐ **The generalisable lesson:** when two halves of your stack speak different protocols, the adaptor between them is not free — you pay serialization cost **twice per request**, plus the maintenance cost of keeping two schemas in sync. That's the real argument for standardising a protocol across an organisation.
+
+Rather than fork OpenSearch or keep the adaptor, Uber contributed a **native gRPC transport upstream**.
+
+### 19.2 The design — gRPC and REST as co-equal transports
+
+| Decision | Detail |
+|---|---|
+| **Both, not either** | The gRPC transport ships as a **module** running on a **different set of ports** alongside REST. Both are first-class |
+| **Only the edge differs** | *"Only the client-server layer differs between the REST and gRPC transports, while the internal node-to-node logic remains shared."* |
+| **Extensible** | The transport publishes an **SPI** so plugins (e.g. k-NN) can register their own Proto↔POJO converters and even expose their own gRPC services |
+| **Scoped to what matters** | They shipped **Search** and **Bulk** first — the two most latency-sensitive APIs |
+| **Migration path** | *"We did this while preserving REST compatibility, enabling teams to migrate incrementally rather than all at once."* |
+
+**Keeping two API surfaces in sync — the hard part.** They built an automated **OpenAPI spec → Protobuf** pipeline with three stages:
+
+| Stage | Job |
+|---|---|
+| **Preprocessing** | Resolve semantic mismatches. REST leans on method-and-path semantics, query parameters and status-code-driven behaviour; Protobuf needs **explicit, strongly typed request/response messages**. The pipeline normalises the OpenAPI spec and makes those implicit behaviours explicit |
+| **Core conversion** | OpenAPI Generator had no robust JSON→Protobuf support, so Uber **derived and contributed a set of conversion rules upstream** |
+| **Postprocessing** | Enforce **wire compatibility**. *"Unlike REST, Protobuf APIs can't tolerate changes such as field renumbering without breaking existing clients."* Every change is checked against previously generated Protobufs |
+
+> ⭐ This is the concrete version of the §12 complaint about RPC — *"stub regeneration on every signature change"*. The mature answer isn't "avoid gRPC", it's **"automate spec→IDL generation and gate every change on a backward-compatibility check in CI."**
+
+### 19.3 The numbers — this is what you quote
+
+**Ingestion (Bulk API), M3 metrics platform:**
+
+| Metric | REST/JSON | gRPC | Change |
+|---|---|---|---|
+| **p99** index write latency | 34.1 ms | 13.6 ms | **≈ −60%** |
+| **p50** index write latency | 15.8 ms | 10.5 ms | **≈ −34%** |
+| Max indexing delay @ 600 RPS | — | — | **−33%** |
+| Max indexing delay @ 800 RPS | — | — | **−20%** |
+| Spark batch indexing job runtime | — | — | **−20–35%** |
+
+Note the failover detail: max indexing delay is *"a top-line business-impacting metric, especially critical during failovers"* — and the REST/gRPC gap **widened as RPS increased**. gRPC's advantage grows precisely when you need it most.
+
+**Search — Uber Eats delivery shopping lists (vector search):**
+
+| Percentile | REST/JSON | gRPC | Change |
+|---|---|---|---|
+| p50 | 83 ms | 38 ms | **≈ −53%** |
+| p95 | 114 ms | 64 ms | **≈ −43%** |
+| p99 | 205 ms | 176 ms | **≈ −14%** |
+
+**Why vectors gain the most — payload size:**
+
+| Vector dimensions | REST/JSON request | gRPC/Protobuf request | Saving |
+|---|---|---|---|
+| 1,572 | 40,523 B | 4,590 B | **88.7%** |
+| 512 | 14,531 B | 2,500 B | **82.8%** |
+| 256 | 7,954 B | 1,500 B | **81.1%** |
+
+> *"Vectors are very inefficiently serialized in JSON, as opposed to using a packed encoding format for a repeated float type in Protobuf."*
+>
+> A `float32` costs 4 bytes packed in Protobuf. As JSON text — `-0.03847261,` — it costs a dozen-plus **characters**, plus parsing. Multiply by 1,572 dimensions per query.
+
+**Transport vs format are separate axes** — a subtlety most candidates miss. Uber also tested **SMILE** (a binary representation of JSON):
+
+| Comparison | gRPC + SMILE is… |
+|---|---|
+| vs REST + JSON | **30% faster** |
+| vs gRPC + JSON | **45% faster** |
+| vs REST + SMILE | **47% faster** |
+
+So you get *two independent* wins: one from the **transport** (HTTP/2, binary framing, multiplexing, no per-request header overhead) and one from the **serialization format**. Naming both separately is a strong signal.
+
+### 19.4 When gRPC actually wins — Uber's own summary
+
+> *"gRPC offers better performance for: workloads with **large request sizes**; **higher throughput at larger RPS**; documents represented with **binary document formats**."*
+
+Which inverts cleanly into the honest counter-position:
+
+| gRPC's edge is **small** when… | Because |
+|---|---|
+| Payloads are small | Serialization was never the bottleneck; you're measuring RTT |
+| Traffic is low | HTTP/2 multiplexing has nothing to multiplex |
+| The consumer is a browser | You need grpc-web + a proxy, and you lose `curl`-ability |
+| You need HTTP caching at a CDN | POST-over-HTTP/2 to one endpoint isn't cacheable by intermediaries ([§5](#5-rest-vs-graphql--the-bytebytego-breakdown)) |
+| Your bottleneck is the database | You've optimised the wrong layer |
+
+### 19.5 The takeaway line
+
+> *"One of our biggest takeaways is that **API representation is not a surface-level choice**. At scale, it shapes system evolution, performance ceilings, and developer velocity."*
+
+> ⭐ **Say this when asked "REST or gRPC?":**
+> *"It depends on payload shape and who the client is, and I'd want to name the two axes separately — transport and encoding. Uber published the cleanest data I know of: adding native gRPC to OpenSearch cut p99 ingest latency 60% and p50 vector-search latency 53%, and the vector request bodies shrank ~85% because JSON encodes floats as text while Protobuf packs them. But their p99 search only improved 14%, because the tail was dominated by genuinely large queries rather than serialization — so the win is proportional to payload size, not universal. The design choice I'd copy is that they **kept REST**: gRPC ran as a module on separate ports sharing all the internal logic, which let teams migrate incrementally. And they automated OpenAPI→Protobuf generation with a wire-compatibility gate in CI, which is the real answer to the 'IDL drift and stub regeneration' objection to RPC."*

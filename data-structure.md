@@ -33,6 +33,7 @@ data structures
 | 9 | **Which structure does each system use?** ⭐ | [§9](#9-where-each-structure-shows-up-in-system-design) |
 | 10 | Structure selection flow chart | [§10](#10-how-to-choose) |
 | ★ | Rapid-fire Q&A | [§11](#11-rapid-fire-qa) |
+| ★ | 🏭 **Real-world: hash rings · buddy allocation · sparse indexes · version stamps** | [§12](#12-real-world-case-study--these-structures-inside-uber-and-linkedin-infrastructure) |
 
 ---
 
@@ -384,3 +385,114 @@ flowchart TD
 | **What is a Merkle tree used for?** | Comparing large datasets cheaply — replica repair in Cassandra/Dynamo, Git, blockchains, S3 integrity. |
 | **Adjacency matrix vs list?** | Matrix: O(V²) space, O(1) edge lookup — dense graphs. List: O(V+E) space — every real-world graph. |
 | **What is a circular buffer for?** | Fixed-memory streaming: logs, metrics windows, audio buffers, batching. It never allocates after startup. |
+
+---
+
+## 12. Real-World Case Study — these structures inside Uber and LinkedIn infrastructure
+
+> **Sources:** LinkedIn — *[Northguard and Xinfra](https://www.linkedin.com/blog/engineering/infrastructure/introducing-northguard-and-xinfra)* · Uber — *[CacheFront](https://www.uber.com/en-US/blog/how-uber-serves-over-40-million-reads-per-second-using-an-integrated-cache/)*, *[Intelligent load management](https://www.uber.com/in/en/blog/from-static-rate-limiting-to-intelligent-load-management/)*.
+>
+> Every structure below is one you already know from [§10 How to choose](#10-how-to-choose). This is where each one actually shows up in a system serving trillions of records a day.
+
+### 12.1 Consistent hash ring — sharding *metadata*, not just data
+
+Northguard's control plane is a **DS-RSM** (Dynamically-Sharded Replicated State Machine): a set of **vnodes** spread over a **consistent hash ring**, each vnode being a Raft group that owns one shard of the cluster's metadata.
+
+| What's hashed | Hashed by | Why |
+|---|---|---|
+| Topic metadata | **Topic name** | All operations on one topic land on one coordinator |
+| Range & segment metadata | **Range ID** | *"This minimises metadata hotspots"* — a busy topic's segments spread across many vnodes |
+
+The interesting part is the **choice of hash key per entity type**. Hashing everything by topic name would have concentrated all of a hot topic's segment churn on one Raft group. Splitting the key space by entity gives you locality where you want it (topic operations) and spread where you need it (segment churn).
+
+**Uber does the same trick in reverse, for blast radius.** CacheFront shards Redis by **partition key** — deliberately a *different* scheme from Docstore's own sharding — so that when one Redis cluster dies, *"all requests from a failed Redis shard will be distributed among all database shards"* instead of stampeding one.
+
+> ⭐ **Say this:** *"Consistent hashing isn't only for placing data on nodes. Two shard keys worth choosing deliberately: hash **metadata** by an entity-appropriate key so the control plane doesn't develop hotspots, and hash your **cache** by a different key than your database so a cache-shard outage fans out across all database shards instead of concentrating on one."*
+
+### 12.2 Buddy allocation — from the OS textbook to a log store
+
+Northguard's **ranges** (its log abstraction, covering a contiguous slice of the keyspace) split and merge *"exactly the same way that the **buddy memory allocator** algorithm works"* — a range can only be merged with its unique **buddy** range.
+
+```mermaid
+flowchart TD
+    R1["Range R1<br/>keyspace [0, 1)"] -->|split| R2["R2 [0, 0.5)"]
+    R1 -->|split| R3["R3 [0.5, 1)"]
+    R2 -->|merge with buddy| R4["R4 [0, 1)"]
+    R3 -->|merge with buddy| R4
+
+    style R1 fill:#dae8fc
+    style R4 fill:#d5e8d4
+```
+
+Two properties fall out of the buddy discipline for free:
+
+| Property | Consequence |
+|---|---|
+| **Total ordering survives split/merge** | Split `R1 → R2, R3`: every record in `R1` **happens-before** every record in `R2` and `R3`. Merge `R2, R3 → R4`: both happen-before `R4` |
+| **Ranges of different topics inherently align** | Two streams partitioned the same way can be **joined without a shuffle**. Compare Kafka: joining a 10-partition stream with a 16-partition stream forces an expensive repartition |
+
+> ⭐ A classic OS-course structure (buddy allocation) chosen for a distributed log, because the constraint it enforces — you may only merge with your buddy — is exactly what keeps the key-space partitioning **aligned and reversible**. Good structure choices come from the invariant you need, not from the domain the structure came from.
+
+### 12.3 Sparse index + LSM + write-ahead log — a storage engine, disassembled
+
+Northguard's segment store ("fps store") is a compact tour of [§5 Trees](#5-trees):
+
+| Component | Structure | Role |
+|---|---|---|
+| **Write-ahead log** | Append-only sequential file | Durability. Written and `fsync`'d before the data is considered committed |
+| **File-per-segment** | Immutable ~1 GB files | Segments are sealed at 1 GB, 1 hour, or replica failure — then never modified |
+| **Sparse index in RocksDB** | **LSM tree** | Maps offsets to file positions. Sparse = one entry per block, not per record: the index stays in memory and you do one short scan after the lookup |
+| **Direct I/O + app-level cache** | — | The broker knows which consume streams are active, so it caches what will genuinely be read next |
+
+**Why sparse and not dense?** A dense index over trillions of records would not fit in memory. A sparse index trades a tiny bounded scan for an index small enough to keep resident — the same trade B+Tree page-level indexing and Kafka's own `.index` files make.
+
+**Batching before flush** is the other detail: appends accumulate until *~10 ms* have passed, or a size limit, or an append-count limit. That's the classic latency-vs-throughput knob — one `fsync` amortised over many records ([latency.md §7](latency.md#7-throughput-littles-law--why-queues-explode)).
+
+### 12.4 Sliding window — for error counting, not just for rate limiting
+
+CacheFront's circuit breaker is a **sliding window over time buckets**:
+
+> *"We count the number of errors on each node **per time bucket** and compute the number of errors in the sliding window width."*
+
+| Detail | Why it matters |
+|---|---|
+| **Bucketed** counters, not a per-event list | O(number of buckets) memory regardless of traffic volume — the same reason you bucket a histogram instead of storing samples |
+| **Proportional** short-circuiting | *"The circuit breaker is configured to short circuit **a fraction** of the requests to that node, proportional to the error count"* — then trips fully at the threshold |
+| **Per node** | The window is keyed by Redis node, so one sick node doesn't trip the breaker for healthy ones |
+
+That gradual response is the structural difference from a textbook breaker: a boolean open/closed flag oscillates; a proportional response derived from a windowed count degrades smoothly.
+
+### 12.5 Priority queue — request tiering under overload
+
+Uber's shedder ranks every request into tiers **t0 … t5** (t0 = critical infrastructure, t1 = the most important user-facing traffic, t5 = background pipelines) and sheds from the bottom up. Requests without an explicit priority get a default derived from the calling service.
+
+The structural insight is a nice one for an interview: **once the queue is a priority queue, you no longer need separate queues per workload class.** Their v1 ran three physical queues (read / write / slow); after adding priority, *"we simplified the queue structure to just read and write queues. Long-running and background operations were marked with lower priority instead of having a separate queue."*
+
+Paired with **adaptive LIFO** — FIFO at normal load, **LIFO under pressure**, because the requests at the head of an overloaded FIFO queue have already been abandoned by their callers ([concurrency.md §10](concurrency.md#10-real-world-case-study--concurrency-control-inside-ubers-databases)).
+
+### 12.6 Version stamps — CAS across a network
+
+The lost-update race between CacheFront's read path and its CDC consumer is solved with a structure you already know from **optimistic locking** and the **ABA problem** ([§11](#11-rapid-fire-qa)):
+
+| Element | Implementation |
+|---|---|
+| **Version** | The MySQL row **timestamp**, encoded into the value stored in Redis |
+| **Compare-and-set** | A **Lua script run via `EVAL`** that behaves like `MSET` but first parses the timestamps already present and only writes if the incoming value is newer |
+| **Atomicity** | Redis runs the script atomically — *"in a single request instead of requiring multiple round trips"* |
+
+Also in the same system: **negative caching**, where absent rows are stored *"with a special flag"* so repeat lookups for non-existent keys never reach the database. That's the same job a **bloom filter** does inside an LSM engine — cheaply proving absence to skip an expensive lookup — implemented here as an explicit tombstone because the key set is unbounded and the answer must be exact.
+
+### 12.7 The pattern behind all of them
+
+| Structure | Where it appeared | The invariant it was chosen for |
+|---|---|---|
+| Consistent hash ring | Northguard metadata; CacheFront Redis sharding | Even spread + minimal reshuffling; deliberately mismatched keys for blast radius |
+| Buddy-allocated ranges | Northguard log abstraction | Reversible splits that preserve ordering **and** cross-topic alignment |
+| LSM (RocksDB) + sparse index | Northguard segment index | Write-heavy index that must stay memory-resident |
+| Write-ahead log | Northguard durability | Sequential writes; commit before mutate |
+| Sliding window of buckets | CacheFront circuit breaker | Bounded memory error rate over time |
+| Priority queue + adaptive LIFO | Uber Cinnamon | Shed by importance; don't serve abandoned work |
+| Version-stamped CAS | CacheFront invalidation | Lost-update prevention without a distributed lock |
+| Flagged tombstones (negative cache) | CacheFront | Exact absence proof for an unbounded key set |
+
+> ⭐ **Say this:** *"Data-structure choices in infrastructure are almost never about Big-O — everything here is O(1) or O(log n) either way. They're about which **invariant** the structure enforces for free: buddy ranges give you reversible splits that keep ordering, a sparse index gives you a memory-resident index, a bucketed sliding window gives you bounded memory, and a version stamp gives you compare-and-set without a lock. That's the thing I'd reason about out loud."*

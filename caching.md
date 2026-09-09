@@ -49,6 +49,7 @@
 | **★** | **Team discussion log + fact-check** (Tarang × Mahesh) | [§21](#21-discussion-log--tarang--mahesh) |
 | **★** | **A worked example for EVERY technique in this file** | [§22](#22-worked-examples--one-for-every-technique-in-this-file) |
 | **★** | **Amazon's 7-point caching checklist** | [§23](#23-amazons-caching-checklist) |
+| **★** | 🏭 **Real-world case study — Uber CacheFront (40M reads/sec)** | [§24](#24-real-world-case-study--uber-cachefront-40m-readssec) |
 
 ---
 
@@ -2194,3 +2195,150 @@ Both reduce perceived latency; only the first is "caching" in the sense this doc
 > *"Despite the benefits of these techniques, we don't take the decision to incorporate caching lightly, because the downsides can often outweigh the upsides."*
 >
 > That is the opposite of how most candidates treat caching in an interview — and saying it is a strong signal.
+
+---
+
+## 24. Real-World Case Study — Uber CacheFront (40M reads/sec)
+
+> **Source:** Uber Engineering — *[How Uber Serves Over 40 Million Reads Per Second from Online Storage Using an Integrated Cache](https://www.uber.com/en-US/blog/how-uber-serves-over-40-million-reads-per-second-using-an-integrated-cache/)* (Feb 2024).
+>
+> This one system uses **almost every technique in this file at once**: cache-aside ([§8](#8-caching-patterns-read--write)), CDC invalidation ([§11](#11-cache-invalidation--the-most-annoying-part-of-caching)), negative caching ([§13.2](#132-cache-penetration)), cache warming ([§13](#13-cache-failure-scenarios--problem--solution)), sharding ([§14](#14-distributed-caching-sharding-replication-consistent-hashing)) and observability ([§16](#16-cache-observability)). Learn this one and you have a concrete answer for every caching sub-question.
+
+### 24.1 The starting problem — *"every team builds its own cache-aside"*
+
+**Docstore** is Uber's in-house distributed database on top of MySQL — tens of petabytes, tens of millions of requests/sec. It has three layers:
+
+| Layer | Responsibility |
+|---|---|
+| **Stateless query engine** | Query planning, routing, sharding, schema management, node health, parsing, validation, AuthN/AuthZ |
+| **Stateful storage engine** | Raft consensus, replication, transactions, concurrency control, load management. A partition = **1 leader + 2 followers** of MySQL on NVMe SSDs |
+| **Control plane** | Cluster orchestration |
+
+One customer needed far higher read throughput than anyone before. The options were all bad:
+
+| Option | Why it failed |
+|---|---|
+| **Faster disks / better queries** | There is a floor to how fast you can read from disk |
+| **Vertical scaling** | The MySQL engine itself becomes the bottleneck |
+| **Horizontal scaling (more partitions)** | Operationally slow and risky, and **does not fix hot keys/partitions** |
+| **Just add read replicas** | Reads were *orders of magnitude* higher than writes — the imbalance stays |
+| **Cost** | Every capacity increase multiplies **6×**: 3 stateful nodes × 2 regions |
+
+So teams did the obvious thing: each microservice provisioned **its own Redis** and wrote its own cache-aside code. That produced the three failure modes worth naming in an interview:
+
+1. **N teams provisioning and on-calling N Redis clusters** — caching wasn't any of those teams' core competency.
+2. **Invalidation logic duplicated and decentralised** — every team got it subtly wrong in its own way.
+3. **Region failover = cold cache** — either you replicate the cache yourself, or you eat the latency while it warms.
+
+> ⭐ **The insight:** caching was being solved *above* the database by every caller. Uber moved it *into* the database's stateless layer, where it could be solved once.
+
+### 24.2 The design — cache-aside, but inside the query engine
+
+```mermaid
+flowchart LR
+    C[Client<br/>unchanged Docstore SDK] --> QE[Stateless Query Engine<br/>+ CacheFront]
+    QE <-->|1. GET rows| R[(Redis)]
+    QE -->|2. misses only| SE[Storage Engine<br/>MySQL + Raft]
+    QE -.->|3. async populate| R
+    SE --> FLUX[Flux<br/>tails MySQL binlog]
+    FLUX -->|invalidate / upsert| R
+
+    style R fill:#ffe6cc
+    style FLUX fill:#d5e8d4
+```
+
+Why the **query engine** and not the storage engine?
+
+- It already serves every read and write, so integration is transparent — **clients keep the existing SDK, zero boilerplate**.
+- It **decouples the cache from disk-based storage**, so cache and storage scale independently.
+- It **detaches caching from Docstore's sharding scheme**, which is what kills hot keys/shards/partitions.
+
+**Read path (textbook cache-aside — [§8.1](#8-caching-patterns-read--write)):**
+
+1. Read request arrives for one or more rows.
+2. If caching is enabled, `GET` the rows from Redis and **stream them to the caller immediately**.
+3. Fetch only the *remaining* rows from the storage engine.
+4. **Asynchronously** populate Redis with those rows.
+5. Stream the remaining rows to the caller.
+
+Two scoping decisions that are pure interview gold:
+
+| Decision | Reasoning |
+|---|---|
+| **Start with `ReadRows` only** | >50% of all Docstore queries are point reads by primary key — the simplest case with the biggest payoff. Filtered/`WHERE` queries came later |
+| **Caching is opt-in per database / per table / per request** | Docstore is strongly consistent; caching is not. So the *caller* chooses. **Bypass** for an Eats cart (read-your-writes matters). **Cache** for a restaurant menu (low write throughput) |
+
+> ⭐ **Say this:** *"I wouldn't make caching global. Consistency is a per-flow requirement, so I'd make the cache opt-in at request granularity and default it off for anything a user can immediately read back."*
+
+### 24.3 Invalidation — TTL is the floor, CDC is the answer
+
+Default TTL was **5 minutes**. Lowering it would have destroyed the hit rate *without meaningfully improving consistency* — the classic TTL trap from [§9](#9-ttl-time-to-live).
+
+The hard case is a **conditional update** (`UPDATE … WHERE region = 'x'`). The query engine can't know which rows a filter will touch until MySQL has actually touched them, so it cannot invalidate on the write path.
+
+**Fix: Change Data Capture.** Uber's **Flux** service tails the **MySQL binlog** and publishes row events. A new Flux consumer invalidates or upserts the affected rows in Redis.
+
+| Property | Why it matters |
+|---|---|
+| Cache converges **within seconds**, not minutes | The TTL becomes a safety net, not the mechanism |
+| Reads the **binlog**, not the application | Uncommitted transactions can never pollute the cache |
+| Same pipeline already powers CDC, replication, materialized views, data-lake ingestion | Invalidation rides on infrastructure that already exists → see [distributed-systems.md §10](distributed-systems.md#10-change-data-capture-cdc) |
+
+**The subtle race — and the fix you should be able to name.** The read path writes to the cache *and* Flux writes to the cache. A slow read can finish last and **overwrite a newer value with a stale one**.
+
+> **Solution:** treat the MySQL row **timestamp as a version**, and do the write with a Redis **Lua script via `EVAL`**. The script behaves like `MSET` but compares timestamps first and only writes if the incoming value is newer — **atomically, in a single round trip** instead of read-then-write.
+
+For flows that need **read-your-writes**, CacheFront exposes a dedicated API so the caller can *explicitly* invalidate rows after its write completes. Conditional updates still rely on Flux.
+
+### 24.4 The four resilience features (this is the senior half of the answer)
+
+| Feature | Mechanism | Concept it maps to |
+|---|---|---|
+| **Compare cache** | A shadow mode that mirrors reads to the cache, compares cache vs DB, and emits every mismatch as a metric. Measured **99.99% consistency** | [§16 Observability](#16-cache-observability) — *"if you can't measure staleness, you don't know your consistency"* |
+| **Cache warming** | Docstore is **active-active across 2 regions**. Tail the Redis write stream and replicate **keys, not values**, to the remote region. The remote region issues a *read* through its own query engine; the cache miss populates it from its own local database, and the response is discarded | Avoids two competing replication mechanisms; guarantees each region's cache matches *its own* DB; caps cross-region bandwidth |
+| **Negative caching** | Rows queried but not found are written with a **special "absent" flag**, so repeat lookups never reach MySQL | [§13.2 Cache penetration](#132-cache-penetration) |
+| **Redis sharding by a *different* key** | One Docstore instance maps to **many Redis clusters**, sharded by **partition key** — deliberately *not* Docstore's sharding scheme | If one Redis cluster dies, its misses **fan out across all DB shards** instead of melting one. This is the best "blast radius" argument in the whole blog |
+
+Plus two client-side protections:
+
+- **Sliding-window circuit breaker** — count errors per Redis node per time bucket; short-circuit a *fraction* of requests proportional to the error count; trip fully at the threshold. Avoids paying a guaranteed-to-fail network round trip.
+- **Adaptive timeouts** — a fixed Redis timeout is unwinnable: too short wastes Redis work and dumps load on MySQL; too long wrecks p99.9/p99.99. So the timeout is **tuned dynamically to the P99.99 of observed cache latency**; operators only configure the *maximum* acceptable value. 99.99% of requests get the cache; the slow 0.01% are cancelled early and served from the database.
+
+> ⭐ **Say this:** *"A cache timeout should be derived from the cache's own latency distribution, not hard-coded. Otherwise you're choosing between wasting cache capacity and importing the cache's tail into your p99."*
+
+### 24.5 The results — the numbers to quote
+
+| Metric | Result |
+|---|---|
+| **P75 latency** | **↓ 75%** |
+| **P99.9 latency** | **↓ 67%**, with latency spikes flattened |
+| **Largest single use case** | **6M RPS at a 99% hit rate**, with a proven region failover |
+| **Cost of that use case** | ~**60K CPU cores** from the storage engine → ~**3K Redis cores** |
+| **Consistency (measured)** | **99.99%** via compare-cache |
+| **Total today** | **> 40M cache reads/sec** across all Docstore instances |
+
+### 24.6 What to take into an interview
+
+```mermaid
+mindmap
+  root((CacheFront<br/>lessons))
+    Placement
+      Cache in the shared layer, not per team
+      Decouple cache sharding from DB sharding
+      Opt-in per request
+    Invalidation
+      TTL is a backstop
+      CDC from the binlog is the mechanism
+      Version by row timestamp
+      Atomic compare-and-set via Lua
+    Resilience
+      Negative caching
+      Circuit breaker per node
+      Adaptive timeouts
+      Warm the remote region by key, not value
+    Proof
+      Shadow compare mode
+      Hit rate + staleness as first-class metrics
+```
+
+> **The 30-second version:** *"Uber's answer to 'every team runs its own Redis' was to push cache-aside down into the database's stateless query layer. Reads stream from Redis and fall through to MySQL; writes invalidate through Flux, their binlog CDC service, so the cache converges in seconds instead of the 5-minute TTL. The details that make it production-grade are the ones I'd copy: version rows by MySQL timestamp and do the cache write with an atomic Lua script so the read path can't overwrite a newer value; shard Redis on a different key than the database so one Redis outage spreads across all shards instead of hot-shotting one; warm the failover region by replicating keys, not values; and run a shadow compare mode so consistency is a measured number — theirs is 99.99%. The payoff was 6M RPS served from 3K Redis cores instead of 60K database cores."*

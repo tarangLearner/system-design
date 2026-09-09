@@ -23,6 +23,7 @@
 | 11 | Distributed transactions: 2PC, saga, outbox, idempotency | [§11](#11-distributed-transactions) |
 | 12 | Choosing a database — decision flow | [§12](#12-choosing-a-database) |
 | ★ | Rapid-fire Q&A | [§13](#13-rapid-fire-qa) |
+| ★ | 🏭 **Real-world: Uber Docstore & LinkedIn's storage stack** | [§14](#14-real-world-case-studies--uber-docstore--linkedins-storage-stack) |
 
 ---
 
@@ -482,3 +483,131 @@ ON CONFLICT (idempotency_key) DO NOTHING;
 | **How do you avoid double-charging?** | Idempotency key stored with the result; retries return the stored response. Plus a unique constraint in the DB as the backstop. |
 | **How do you publish an event and write a row atomically?** | **Transactional outbox** — write both in one local transaction, relay/CDC publishes from the outbox. Never dual-write. |
 | **Where do you store images/video?** | Object storage (S3), with the URL in the database. Never blobs in a relational DB. |
+
+---
+
+## 14. Real-World Case Studies — Uber Docstore & LinkedIn's storage stack
+
+> **Sources:** Uber — *[Serving 40M reads/sec with an integrated cache](https://www.uber.com/en-US/blog/how-uber-serves-over-40-million-reads-per-second-using-an-integrated-cache/)* and *[From static rate-limiting to intelligent load management](https://www.uber.com/in/en/blog/from-static-rate-limiting-to-intelligent-load-management/)* · LinkedIn — *[Northguard and Xinfra](https://www.linkedin.com/blog/engineering/infrastructure/introducing-northguard-and-xinfra)*.
+
+### 14.1 Uber Docstore — what "MySQL at planet scale" actually looks like
+
+**Docstore** and its append-optimised sibling **Schemaless** are Uber's in-house distributed databases built **on top of MySQL**. Scale: thousands of clusters, **tens of petabytes**, **tens of millions of requests/sec**, billions of rows read or updated, backing 170M+ monthly active users.
+
+```mermaid
+flowchart TD
+    C[Microservices] --> QE["<b>Stateless query engine</b><br/>query planning · routing · sharding<br/>schema mgmt · node health<br/>parsing · validation · AuthN/AuthZ"]
+    QE --> P1["<b>Partition 1</b><br/>leader + 2 followers<br/>Raft · MySQL on NVMe SSD"]
+    QE --> P2["<b>Partition 2</b>"]
+    QE --> P3["<b>Partition N</b>"]
+    CP["<b>Control plane</b>"] -.-> QE
+    CP -.-> P1
+
+    style QE fill:#dae8fc
+    style P1 fill:#d5e8d4
+```
+
+| Layer | Owns |
+|---|---|
+| **Stateless query engine** | Query planning, request routing, sharding, schema management, node health monitoring, parsing, validation, authorization |
+| **Stateful storage engine** | Transactions, connection pooling, **consensus via Raft**, replication, concurrency control, load management |
+| **Partition** | **1 leader + 2 followers** of MySQL on **locally attached NVMe SSDs**, coordinated by Raft for **strong consistency** |
+
+**Four things to take from this architecture:**
+
+1. **Separating a stateless routing tier from a stateful storage tier is the standard shape.** It's what lets you scale query capacity and storage capacity independently — the same split as [§5 The scaling ladder](#5-the-database-scaling-ladder), just made explicit.
+2. **"Use a distributed database" usually means "use MySQL/Postgres with a consensus layer on top."** Docstore, Vitess, PlanetScale and CockroachDB all keep a boring, battle-tested storage engine and add consensus + sharding around it. Saying this is far stronger than naming an exotic database.
+3. **Replication factor 3 with Raft** ([distributed-systems.md §4](distributed-systems.md#4-consensus--leader-election)) is the default for a reason: a majority quorum of 3 tolerates one failure at the lowest cost.
+4. **Cost scales with the replication topology, not with the data.** Uber's blunt framing: capacity increases are *"multiplied 6× to handle each of the 3 stateful nodes across both regions."* That single sentence is the best argument for caching a read-heavy workload instead of scaling the database.
+
+### 14.2 Partition key vs primary key — the distinction people fumble
+
+Docstore makes the relationship explicit, and it's the cleanest definition you'll find:
+
+| Term | Definition |
+|---|---|
+| **Primary key** (row key) | Uniquely identifies a row and enforces uniqueness. One or more columns |
+| **Partition key** | A **prefix of the primary key** that determines **which shard the row lives in** |
+
+> They are not separate keys — *"partition keys are simply a part of (or equal to) the primary."*
+
+**Example from the blog:**
+
+| Table | Partition key | Primary key |
+|---|---|---|
+| `person` | `person_id` | `person_id` |
+| `orders` | `cust_id` | `(cust_id, order_id)` |
+
+That design means **all of one customer's orders live on one shard** — so "fetch this customer's orders" is a single-shard read rather than a scatter-gather ([§7](#7-sharding-partitioning)). It's also exactly how DynamoDB (partition key + sort key) and Cassandra (partition key + clustering columns) model data.
+
+### 14.3 Why scaling a hot workload the "obvious" way fails
+
+Uber lists the ladder they climbed and why every rung ran out — this is the honest version of [§5](#5-the-database-scaling-ladder):
+
+| Rung | Why it stopped working |
+|---|---|
+| **Optimise data model + queries** | *"There's a limit to how far one can optimise… beyond that, squeezing out more performance is not possible."* |
+| **Vertical scaling** | *"The database engine itself becomes a bottleneck."* Bigger hardware stops helping |
+| **Horizontal scaling (more partitions)** | Works "to an extent", but is *"operationally more complex and lengthy"* — you must preserve durability and resiliency with no downtime — and crucially **"doesn't fully help solve the issues of hot keys/partitions/shards"** |
+| **Request imbalance** | Reads were **orders of magnitude** higher than writes, so the leader MySQL node struggles regardless of how you split |
+| **Cost** | Every rung is multiplied by (replicas × regions) |
+
+> ⭐ **Say this:** *"Sharding is the answer to a **capacity** problem. It is not the answer to a **skew** problem — resharding doesn't fix a hot key, it just gives the hot key a smaller neighbourhood. For skew I'd reach for caching, key-splitting, or bounded-load hashing first."*
+
+### 14.4 Protecting a stateful database from overload
+
+The full story is in [load-balancer.md §26](load-balancer.md#26-real-world-case-study--ubers-load-manager-static-rate-limits--priority-aware-shedding), but three points belong in a database discussion:
+
+| Point | Detail |
+|---|---|
+| **Put admission control next to the state** | Uber first tried quota-based rate limiting in the *stateless* routing tier. It failed, partly because the routing tier would have had to track realtime health for **thousands of partitions**. Conclusion: *"overload management must live as close to the storage nodes as possible."* |
+| **Byte-based cost models lie** | In MySQL, *"a query that performs a full table scan but returns a single row was assigned the same capacity cost as a query that only reads a single row."* Any quota built on that metric is meaningless — a great point to raise if an interviewer proposes "cost-based" rate limiting |
+| **Hot partition keys need their own regulator** | Concurrency-based shedding is blind to skew: a low-QPS caller with huge writes, or traffic concentrated on one partition key, will overload one cluster while the rest idle. Uber runs dedicated **write-bytes** and **partition-key** regulators alongside the general shedder |
+
+### 14.5 Consistency is a **per-flow** decision, not a database-wide one
+
+Docstore is strongly consistent; its cache is not. So caching was made **opt-in per database, per table, and even per request**:
+
+| Flow | Choice | Reason |
+|---|---|---|
+| Items in an Eats **cart** | **Bypass the cache** | Read-your-writes matters; a stale cart is a bug |
+| A restaurant **menu** | **Use the cache** | Low write throughput, staleness is harmless |
+
+> ⭐ This is the practical form of **PACELC** ([§10](#10-cap--pacelc-applied)): with no partition you are still trading **latency against consistency**, and the right trade differs per endpoint. The strongest version of the answer is *"I'd expose it as a per-request header rather than picking one global consistency level."*
+
+They also added an explicit **invalidate-after-write API** so callers that need read-your-writes can get it on point writes, while conditional updates fall back to CDC-driven invalidation.
+
+### 14.6 LinkedIn — a storage stack chosen per access pattern
+
+The `Xinfra-metadata-service` is a compact, real example of **polyglot persistence** ([§12](#12-choosing-a-database)) — four stores in one service, each doing what it's best at:
+
+| Store | Used for | Why |
+|---|---|---|
+| **MySQL** | Virtual/physical topic and cluster metadata | Relational, low volume, needs transactions and constraints |
+| **ZooKeeper** | Membership, leadership, consumer-group allocation and rebalancing | Consensus-backed coordination — *not* a database ([distributed-systems.md §5](distributed-systems.md#5-distributed-locking)) |
+| **Vitess** (sharded MySQL) + a coalescing buffer | Consumer checkpoint storage | High write rate; the buffer collapses repeated offset updates before they hit disk |
+| **Couchbase** | Cache in front of checkpoints | Low-latency checkpoint reads and writes |
+
+And **Northguard's own storage engine** is a tidy summary of storage-engine vocabulary: a **write-ahead log**, **file-per-segment**, **Direct I/O**, and a **sparse index kept in RocksDB** (an LSM store — [§4](#4-indexing)). Appends batch until ~10 ms pass or a size/count limit is hit; then WAL write → append → `fsync` → index update. Direct I/O avoids double buffering and keeps state consistent across `fsync` failures.
+
+**Durability, stated as a number** — the clearest ACID-D contrast you'll find:
+
+| System | Durability guarantee |
+|---|---|
+| Kafka (as configured at LinkedIn) | **Lazy syncs** — 10 seconds / 20k records |
+| Northguard | **`fsync` on all replicas before the produce ack** — 10 ms / 20k records / 10 MB |
+
+> ⭐ **Say this:** *"Durability isn't a boolean, it's a window. The honest question is 'how many milliseconds of acknowledged writes am I willing to lose, and on how many replicas must the fsync land before I ack?' LinkedIn moved from a 10-second lazy sync to fsync-on-all-replicas-before-ack, and paid for it with a better replication design rather than with latency."*
+
+### 14.7 Numbers worth memorising
+
+| Fact | Number |
+|---|---|
+| Docstore scale | Tens of PB, tens of millions of req/sec, thousands of clusters |
+| Docstore partition topology | 1 leader + 2 followers, Raft, NVMe SSD |
+| Cost multiplier per capacity increase | **6×** (3 nodes × 2 regions) |
+| Share of Docstore queries that are point reads | **> 50%** |
+| Cache vs database cost for one 6M-RPS use case | ~**3K Redis cores** vs ~**60K database cores** |
+| Overload protection gains (PID shedder vs token bucket) | **+80%** throughput, **−70%** p99 |
+| LinkedIn Kafka volume before migration | 32 T records/day, 17 PB/day, 400K topics, 150 clusters |
+| Kafka control-plane limit | **1** controller / **1** state machine vs Northguard's **128+** |

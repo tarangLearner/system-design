@@ -19,6 +19,7 @@
 | 7 | Classic interview problems with solutions | [§7](#7-classic-interview-problems) |
 | 8 | Concurrency inside a *system design* answer | [§8](#8-concurrency-at-system-scale) |
 | ★ | Rapid-fire Q&A | [§9](#9-rapid-fire-qa) |
+| ★ | 🏭 **Real-world: adaptive LIFO queues · goroutine regulators · CAS over a network** | [§10](#10-real-world-case-study--concurrency-control-inside-ubers-databases) |
 
 ---
 
@@ -594,3 +595,131 @@ The same problems reappear across machines — with better names and worse failu
 | **Best way to make a class thread-safe?** | Make it **immutable**. Then confine, then use concurrent collections, then atomics, and only then locks. |
 | **How do you debug a deadlock?** | Thread dump (`jstack`/`jcmd`), look for `BLOCKED` threads and the "found one Java-level deadlock" report; build the wait-for graph. |
 | **Optimistic vs pessimistic locking?** | Pessimistic locks up front (high contention); optimistic detects conflict at write time via a version and retries (low contention). |
+
+---
+
+## 10. Real-World Case Study — concurrency control inside Uber's databases
+
+> **Sources:** Uber Engineering — *[Intelligent load management](https://www.uber.com/in/en/blog/from-static-rate-limiting-to-intelligent-load-management/)* (Apr 2026) and *[CacheFront](https://www.uber.com/en-US/blog/how-uber-serves-over-40-million-reads-per-second-using-an-integrated-cache/)* (Feb 2024).
+>
+> [§8](#8-concurrency-at-system-scale) says "bound your queue and shed load." This is what that looks like when a real team builds it for a database serving tens of millions of requests/sec.
+
+### 10.1 Concurrency as the health signal
+
+Uber needed one number to answer *"is this node drowning?"*. They rejected QPS and chose **in-flight concurrency**:
+
+$$\text{Concurrency} = \text{Throughput} \times \text{Latency}$$
+
+> *"Simple QPS-based rate limiting is too coarse. It fails to account for workload variability, often shedding too late or too early. What can be more effective is concurrency: the number of operations currently in flight. It directly reflects system load, following Little's Law."*
+
+This is the same **Little's Law** you use to size a thread pool ([§8](#8-concurrency-at-system-scale)) — used backwards. When latency rises at constant throughput, in-flight count rises **automatically**, so the detector re-calibrates itself as the workload changes. A QPS threshold cannot do that.
+
+> ⭐ **Say this:** *"I'd instrument in-flight concurrency, not just QPS. Concurrency is throughput × latency, so it's the only single metric that moves when **either** the arrival rate or the service time degrades — which makes it the right trigger for backpressure."*
+
+### 10.2 Adaptive LIFO — the queue discipline nobody teaches
+
+The classic bounded work queue in front of a thread pool is **FIFO**. Under overload, FIFO is actively harmful:
+
+```mermaid
+flowchart TD
+    subgraph FIFO["FIFO under overload — the trap"]
+        A1["Head: request queued 8 s ago"] --> A2["Client already timed out<br/>and retried"]
+        A2 --> A3["You spend a worker<br/>producing an answer<br/>nobody is listening for"]
+        A4["Tail: request queued 5 ms ago<br/>caller still waiting"] --> A5[Starves]
+    end
+    subgraph LIFO["Adaptive LIFO — the fix"]
+        B1["Normal load → behave as FIFO<br/>fair and ordered"]
+        B2["Overload → flip to LIFO<br/>serve the newest first"]
+        B2 --> B3["Fresh requests still have<br/>a caller → they can succeed"]
+        B2 --> B4["Stale requests age out<br/>and are shed"]
+    end
+
+    style A3 fill:#f8cecc
+    style A5 fill:#f8cecc
+    style B3 fill:#d5e8d4
+```
+
+From the blog:
+
+> *"Under overload, FIFO creates a trap: old requests accumulate, wait too long, and often get abandoned or retried by the client. This results in wasted work. Meanwhile, fresh requests, still relevant and likely to succeed, sit idle at the end of the line."*
+>
+> *"Under normal load, the queue behaves as FIFO. Under pressure, it switches to LIFO, favoring newer requests that still have a chance to succeed."*
+
+This comes from **CoDel (Controlled Delay)**, borrowed from networking's bufferbloat work: shed based on **how long an item has waited**, not on how many items are queued. Queue *length* tells you nothing about whether the work is still wanted; queue *latency* does.
+
+**Queue isolation** is the other half — separate queues per operation class so one class can't starve another. Uber ran three: **read** (point lookups), **write** (insert/update/upsert), **slow** (scans, deletes, background jobs, replication). That's the **bulkhead pattern** ([§8](#8-concurrency-at-system-scale)) applied to queues rather than connection pools.
+
+### 10.3 Static limits vs a PID controller
+
+The v1 shedder used **fixed queue timeouts and static in-flight concurrency limits**. Two problems, both familiar from thread-pool tuning:
+
+| Problem | Symptom |
+|---|---|
+| **Static limits are low-fidelity for a dynamic system** | *"Requiring frequent manual tuning and leading to operational toil"* — the same reason a hard-coded `nThreads` is always wrong six months later |
+| **Fixed wait times synchronise the clients** | Everything gets rejected at the same instant → everything retries at the same instant → **thundering herd** ([§4](#4-the-failure-modes)) |
+
+The replacement (**Cinnamon**) makes both adaptive:
+
+- Queue timeout thresholds are **derived from the service's own P90 latency**.
+- An **Auto Tuner** continuously adjusts the **in-flight concurrency limit** from live latency and error-rate signals.
+- Shedding is driven by a **PID controller** — it uses *history and trend*, not just the instantaneous error rate.
+
+> *"Simple, reactive shedding based solely on current error rates often causes instability, overcorrecting too late, and too hard. PID based regulation brings balance by incorporating system history and directional trends."*
+>
+> *"Without PID regulation, shedding acts like a hammer: reactive and abrupt. With it, it's more like a dimmer switch: smooth and stable."*
+
+### 10.4 Runtime-level backpressure — the goroutine and memory regulators
+
+Concurrency limits are not only about queues. Uber runs **node-local regulators** that throttle on raw runtime health:
+
+| Regulator | Trips on |
+|---|---|
+| **Goroutines** | Total goroutine count crossing a threshold |
+| **Memory** | Free process memory running low |
+| **Write bytes** | Concurrent write volume, to prevent I/O saturation |
+| **Partition key** | Traffic concentrating on one hot key |
+
+The goroutine regulator is the Go equivalent of *"my thread pool is unbounded and I am about to OOM"*. Note **why** it's needed: goroutines are cheap enough that nothing stops you creating 150,000 of them — the language removes the natural backpressure that expensive OS threads used to provide. So you have to add it back deliberately.
+
+**The measured effect of rejecting immediately instead of holding requests in memory:**
+
+| Metric | Token-bucket limiter | PID-based shedder |
+|---|---|---|
+| Goroutines at overload peak | **150,000** | **10,000** (−93%) |
+| Heap | 5–6 GB spikes | 1 GB max (−60%) |
+| Throughput under overload | 3,000 QPS | 5,400 QPS (+80%) |
+| p99 latency (upsert) | 3.1 s | 1.0 s (−70%) |
+
+> *"Cinnamon sheds excess requests immediately using a PID controller, **avoiding the memory and goroutine buildup caused by token bucket limiters**."*
+
+That's the whole lesson in one line: **a queued request is a live object holding a stack, a buffer and a connection.** "Queue it and hope" is not free — it converts a latency problem into a memory problem, and then into a crash.
+
+### 10.5 Lock-free coordination in the cache path
+
+CacheFront hits a textbook **lost-update race** ([§2](#2-what-actually-goes-wrong)) across processes, not threads:
+
+> The read path writes rows to Redis after a cache miss. Concurrently, the CDC consumer writes the *newest* rows to Redis. A slow read can land **last** and overwrite the newer value with a stale one.
+
+The fix is pure optimistic concurrency control:
+
+| Step | Mechanism |
+|---|---|
+| **Version** | The MySQL row **timestamp** acts as the version, encoded into the cached value |
+| **Compare-and-set** | A Redis **Lua script via `EVAL`** behaves like `MSET` but first compares the timestamps already in the cache and only writes if the incoming value is newer |
+| **Atomicity** | Redis executes the whole script atomically, *"in a single request instead of requiring multiple round trips"* |
+
+That is **CAS with a version stamp** ([§3](#3-synchronization-primitives)) — the same pattern as optimistic row locking, and the same defence against **ABA** — implemented in a distributed system by moving the compare **to** the data rather than pulling the data to the comparer.
+
+> ⭐ **Say this:** *"Read-modify-write over a network is the distributed version of a race condition, and the fix is the same: don't do read-then-write, do compare-and-set. In Redis that means a Lua script so the compare and the write are one atomic operation; in a database it's an optimistic version column. Either way you need a **version** — and a monotonic write timestamp from the source of truth is usually already available."*
+
+### 10.6 The transferable lessons
+
+| Lesson | Applies to |
+|---|---|
+| **Measure in-flight concurrency, not just rate** | Any thread pool, connection pool or queue |
+| **Prefer LIFO under overload** | Any bounded work queue with client timeouts |
+| **Isolate queues per workload class** | Bulkheads, so scans can't starve point reads |
+| **Derive limits from live metrics; configure only the maximum** | Thread-pool sizes, timeouts, queue deadlines |
+| **Reject fast — a queued request costs memory** | Anywhere you were tempted to use an unbounded queue |
+| **Use PID/trend-based control, not step thresholds** | Autoscaling, circuit breakers, shedders |
+| **Cross-process races need CAS + a version** | Caches, distributed counters, any dual-writer path |

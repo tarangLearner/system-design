@@ -121,6 +121,7 @@ https://bytebytego.com/guides/top-5-strategies-to-reduce-latency/
 | 8 | Availability math: nines, series vs parallel, MTBF/MTTR | [§8](#8-availability-math) |
 | 9 | SLI / SLO / SLA / error budget | [§9](#9-sli--slo--sla--error-budget) |
 | ★ | Rapid-fire Q&A | [§10](#10-rapid-fire-qa) |
+| ★ | 🏭 **Real-world: adaptive timeouts, measured percentiles, Little's Law as a detector** | [§11](#11-real-world-case-studies--latency-work-at-uber-and-linkedin) |
 
 ---
 
@@ -417,3 +418,94 @@ flowchart LR
 | **SLI vs SLO vs SLA?** | Measurement, internal target, external contract. `100% − SLO` is your error budget. |
 | **How would you reduce latency for global users?** | CDN + edge TLS termination + regional replicas + connection reuse + caching. Removing round trips and distance beats optimising code. |
 | **What are the top causes of p99 spikes?** | GC pauses, cold starts, lock contention, queueing, retries, connection setup, hot shards, noisy neighbours. |
+
+---
+
+## 11. Real-World Case Studies — latency work at Uber and LinkedIn
+
+> **Sources:** Uber — *[CacheFront: 40M reads/sec](https://www.uber.com/en-US/blog/how-uber-serves-over-40-million-reads-per-second-using-an-integrated-cache/)*, *[Intelligent load management](https://www.uber.com/in/en/blog/from-static-rate-limiting-to-intelligent-load-management/)*, *[High-performance gRPC in OpenSearch](https://www.uber.com/in/en/blog/high-performance-grpc/)*.
+
+### 11.1 Adaptive timeouts — stop hard-coding a number you can't know
+
+This is the single most reusable idea in the CacheFront post, and it applies to *every* timeout you'll ever set.
+
+> *"A timeout that is too short causes Redis requests to fail too early, wasting Redis resources and putting extra load on the database engine. A timeout that is too long impacts the P99.9 and P99.99 latencies, and in the worst case a request may exhaust the entire timeout that is passed in the query."*
+
+```mermaid
+flowchart TD
+    T[Choosing a fixed timeout] --> S[Too short]
+    T --> L[Too long]
+    S --> S1[Requests bypass the cache<br/>load lands on the database<br/>cache capacity wasted]
+    L --> L1["Imports the dependency's tail<br/>into YOUR p99.9 / p99.99"]
+    T --> A[<b>Adaptive timeout</b>]
+    A --> A1["Track the dependency's own<br/>latency distribution"]
+    A1 --> A2["Set timeout ≈ P99.99 of observed latency<br/>operator configures only the MAX"]
+    A2 --> A3["99.99% served fast by the cache<br/>0.01% cancelled early → served from DB"]
+
+    style A fill:#d5e8d4
+    style S1 fill:#f8cecc
+    style L1 fill:#f8cecc
+```
+
+> ⭐ **Say this:** *"A timeout should be derived from the dependency's measured latency distribution, not hard-coded. If I pin it at the dependency's P99.99 and re-derive it continuously, I keep 99.99% of the benefit and cut off the long tail instead of inheriting it. The only thing an operator should configure is the maximum acceptable value."*
+
+Pair it with the **sliding-window circuit breaker** from the same system: count errors per node per time bucket, short-circuit a **fraction** of requests proportional to the error count, and trip fully at the threshold. Fractional shedding avoids the all-or-nothing flip that causes oscillation — the same reasoning as [§4](#4-tail-latency-amplification-the-senior-topic) on outlier ejection.
+
+### 11.2 The measured payoff of a cache — real percentiles
+
+| Metric | Result |
+|---|---|
+| **P75 latency** | **↓ 75%** |
+| **P99.9 latency** | **↓ 67%**, with microburst spikes flattened |
+| **Hit rate at 6M RPS** | **99%** |
+| **Cost of that use case** | ~**60K CPU cores** of database → ~**3K Redis cores** |
+
+Note *which* percentiles they quote. The interesting claim isn't the median — it's that **P99.9 improved and latency spikes during microbursts were stabilised**. A cache that only improves the average has done nothing for the users who actually notice ([§3](#3-percentiles--why-the-average-lies)).
+
+### 11.3 Serialization is a latency lever — the gRPC numbers
+
+Uber replaced REST/JSON with gRPC/Protobuf for OpenSearch traffic. The wins are big enough to quote:
+
+| Workload | Metric | Before → After | Change |
+|---|---|---|---|
+| M3 metrics ingest | **p99** write latency | 34.1 ms → 13.6 ms | **≈ −60%** |
+| M3 metrics ingest | **p50** write latency | 15.8 ms → 10.5 ms | **≈ −34%** |
+| M3 indexer | Max indexing delay | — | **−20–35%** at 600–800 RPS |
+| Spark batch ingest | Job runtime | — | **−20–35%** |
+| Uber Eats shopping lists | **p50** search | 83 ms → 38 ms | **≈ −53%** |
+| Uber Eats shopping lists | **p95** search | 114 ms → 64 ms | **≈ −43%** |
+| Uber Eats shopping lists | **p99** search | 205 ms → 176 ms | **≈ −14%** |
+
+**Read the shape of that last group carefully — it's a percentile lesson in itself.** p50 improved 53%, p95 43%, but p99 only 14%, *"due to long-tail large queries."* Serialization cost is proportional to payload size, so the fix helps typical requests far more than the pathological ones. **A change that halves your median may barely move your tail** — which is exactly why you never report a single number ([§3](#3-percentiles--why-the-average-lies)).
+
+**Where the time actually went:** payload size. For vector search, the request body shrank dramatically because JSON encodes floats as text while Protobuf uses packed binary:
+
+| Vector dimensions | REST/JSON | gRPC/Protobuf | Saving |
+|---|---|---|---|
+| 1,572 | 40,523 B | 4,590 B | **88.7%** |
+| 512 | 14,531 B | 2,500 B | **82.8%** |
+| 256 | 7,954 B | 1,500 B | **81.1%** |
+
+Higher-dimension vectors gained the most — the benefit scales with payload size, which is the general rule for any serialization change.
+
+### 11.4 Little's Law used as an *overload detector*, not just a sizing formula
+
+[§7](#7-throughput-littles-law--why-queues-explode) gives you $L = \lambda W$ for sizing pools. Uber's load manager uses the same identity in reverse, as the **signal** that a stateful system is drowning:
+
+$$\text{Concurrency} = \text{Throughput} \times \text{Latency}$$
+
+| Candidate signal | Verdict |
+|---|---|
+| **QPS threshold** | *"Too coarse. It fails to account for workload variability, often shedding too late or too early."* |
+| **In-flight concurrency** | ✅ *"Directly reflects system load… In stateful systems, it maps closely to resource usage."* |
+
+The elegance: at constant throughput, **rising latency raises concurrency automatically**. The detector needs no re-tuning when the workload changes — unlike a QPS number, which is stale the moment traffic mix shifts.
+
+### 11.5 Two more latency ideas worth stealing
+
+| Idea | Where it came from | Why it matters |
+|---|---|---|
+| **Adaptive LIFO under overload** | Uber's CoDel queues | Under pressure the requests at the *head* of a FIFO queue have already been abandoned or retried, so answering them is wasted work. Switching to LIFO serves requests that still have a caller waiting. Normal load stays FIFO |
+| **Derive the queue timeout from P90 latency** | Uber's Cinnamon shedder | Instead of a static "reject after 5 ms" rule, the timeout tracks the service's own P90 — and an **Auto Tuner** adjusts the in-flight limit from live latency and error-rate signals. Static thresholds cause synchronised rejection and a retry **thundering herd** |
+
+> ⭐ **The closing line to use:** *"Every latency threshold in a system — timeouts, queue deadlines, concurrency limits — is a guess about a distribution. The mature version of each one is derived continuously from the measured distribution, with a human-set maximum as the guardrail. Uber's cache timeouts track P99.99, their queue timeouts track P90, and their in-flight limits are driven by a PID controller. Nothing is a constant."*

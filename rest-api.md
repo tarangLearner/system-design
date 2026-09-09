@@ -36,6 +36,7 @@ REST APIs
 | 13 | **API security** — OWASP API Top 10 | [§13](#13-api-security-owasp) |
 | 14 | API gateway · webhooks · docs · deprecation | [§14](#14-api-gateway-webhooks--lifecycle) |
 | ★ | Design checklist + Rapid-fire Q&A | [§15](#15-api-design-checklist) · [§16](#16-rapid-fire-qa) |
+| ★ | 🏭 **Real-world: why Uber's quota-based rate limiter failed** | [§17](#17-real-world-case-study--why-ubers-quota-based-rate-limiter-failed) |
 
 ---
 
@@ -548,3 +549,108 @@ Run through this before you say "done" in an interview:
 | **How do you handle a 30-second operation?** | `202 Accepted` + a job resource to poll, plus an optional webhook on completion. Never hold the HTTP connection open. |
 | **Load balancer vs API gateway?** | LB picks the instance; gateway enforces policy (auth, quotas, transformation, routing). Gateway usually sits behind the LB. |
 | **REST vs GraphQL vs gRPC?** | REST/GraphQL at the edge for compatibility and caching; gRPC internally for speed and strict contracts → [restvsgraphqlVsRPC.md](restvsgraphqlVsRPC.md) |
+
+---
+
+## 17. Real-World Case Study — why Uber's quota-based rate limiter failed
+
+> **Source:** Uber Engineering — *[How Uber Conquered Database Overload: The Journey from Static Rate-Limiting to Intelligent Load Management](https://www.uber.com/in/en/blog/from-static-rate-limiting-to-intelligent-load-management/)* (Apr 2026).
+>
+> [§10](#10-rate-limiting) tells you how token buckets and 429s work. This tells you **why the textbook design breaks in production** — which is the more interesting half of the conversation.
+
+### 17.1 The design that failed — and it's the one everyone proposes
+
+Uber's first attempt at protecting Docstore/Schemaless was pure §10:
+
+1. Assign every read and write a **capacity-unit cost** based on bytes processed.
+2. Give each tenant a **fixed quota**.
+3. Return **`429 Too Many Requests`** when the quota is exceeded.
+4. Because the routing layer is stateless, keep the counters in a **central Redis**.
+
+*"While conceptually sound, this approach didn't hold up in production."* Four reasons:
+
+| # | Failure | The lesson for your API |
+|---|---|---|
+| **1** | **A Redis round trip on every request** — *"introducing a new point of failure and the overhead of an additional network hop"* | Your rate limiter sits in the hot path of 100% of traffic. It must be cheaper and more available than the thing it protects. This is the concrete reason a limiter should **fail open** ([§10](#10-rate-limiting)) — and the reason to prefer local counters with periodic reconciliation over a synchronous central check |
+| **2** | **The gateway doesn't know who's actually hurting** — to shed for an overloaded backend shard, the stateless tier would need realtime health for *thousands* of partitions | A limiter at the edge protects a **number**, not a **resource**. If the bottleneck is downstream and uneven, edge quotas can't see it |
+| **3** | **The cost model was wrong** — in MySQL, *"a query that performs a full table scan but returns a single row was assigned the same capacity cost as a query that only reads a single row"* | **Bytes returned ≠ work done.** Any "cost-weighted quota" is only as good as its cost function, and request-shape metrics are usually a poor proxy for server work |
+| **4** | **Static quotas** — *"resulting in frequent requests from stakeholders to adjust their quotas, making them ineffective in multitenant environments"* | A hard-coded limit is stale the day you ship it. It generates a permanent stream of support tickets and gets raised until it means nothing |
+
+> ⭐ **The conclusion they drew, worth quoting verbatim:** *"Overload management must live as close to the storage nodes as possible."*
+
+### 17.2 Rate limiting vs load shedding — the distinction to make explicit
+
+The rebuilt system runs **both, in parallel**, because they solve different problems:
+
+```mermaid
+flowchart TD
+    R[Request] --> F{Is one tenant<br/>hogging the resource?}
+    F -->|yes| SC["<b>Scorecard</b> — fairness<br/>per-tenant concurrency cap<br/>rule-based, deterministic<br/>works even at normal load"]
+    R --> G{Is the system<br/>globally overloaded?}
+    G -->|yes| CIN["<b>Cinnamon</b> — resilience<br/>priority-aware shedding<br/>drop t5 before t1<br/>only under pressure"]
+    SC --> D[429 / reject]
+    CIN --> D
+    F -->|no| OK[Serve]
+    G -->|no| OK
+
+    style SC fill:#dae8fc
+    style CIN fill:#ffe6cc
+```
+
+| | **Rate limiting / fairness** | **Load shedding / resilience** |
+|---|---|---|
+| Question it answers | *"Is this **caller** taking more than its share?"* | *"Is the **system** about to fall over?"* |
+| Active when | **Always** — including at normal load | **Only under pressure** |
+| Scope | Per tenant / per caller | Global, by request priority |
+| Real value | **Blast-radius containment** — *"isolates and caps misbehaving tenants without disrupting others"*, and pinpoints the culprit during an incident | Keeps critical traffic alive by dropping the rest |
+
+> ⭐ **Say this:** *"Rate limiting and load shedding are not the same control and I'd implement both. Rate limiting is about fairness between callers and runs all the time; load shedding is about survival and only runs under pressure. If you only build rate limiting, a legitimate global traffic spike takes you down. If you only build shedding, one noisy tenant degrades everyone."*
+
+### 17.3 Request priority — the API design decision nobody makes early enough
+
+Uber's shedder ranks every request by a **priority tier**:
+
+| Tier | Traffic |
+|---|---|
+| **t0** | A small set of critical infrastructure services |
+| **t1** | **The most important user-facing online traffic** — the thing you're actually protecting |
+| … | … |
+| **t5** | Least important: pipelines, aggregators, internal garbage-collection flows |
+
+Two implementation details worth copying into an API design:
+
+- **Priority is carried on the request** — and *"if no explicit priority is present, Cinnamon assigns a default based on the calling service."* So legacy callers still get sensible treatment without a code change. That's the same defaulting discipline as API versioning ([§7](#7-versioning)).
+- Once priority exists, **you stop needing separate queues per workload type.** Background scans and replication simply carry a low tier instead of living in a dedicated "slow" queue.
+
+The reason this matters: *"many overloads stemmed from low-priority, asynchronous jobs: pipelines, aggregators, and internal garbage collection flows. These shouldn't have the same survivability as ride requests or real-time pricing queries."*
+
+> ⭐ **Design implication:** add a criticality/priority dimension to your internal API contract **early**. Retrofitting it means auditing every caller. A header (`X-Request-Priority`) plus a per-caller default in the gateway is enough to start.
+
+### 17.4 The 429 problem — retries make overload worse
+
+Their v1 shed after a **fixed** queue wait. The consequence:
+
+> *"The fixed, static wait times in CoDel led to a **thundering herd** problem. When requests were eventually rejected, they'd all retry at once, triggering repeated cycles of overload and rejection."*
+
+This is the API-design half of the story, and it maps directly onto §10 and §14:
+
+| Fix | Why |
+|---|---|
+| **Always send `Retry-After`** on a 429/503 | Without it, every client picks its own retry moment — and popular HTTP libraries default to nearly the same one |
+| **Require jittered backoff** in your client SDK | Deterministic backoff just re-synchronises the herd at a later timestamp |
+| **Publish a retry budget** (retries ≤ ~10% of traffic) | Caps amplification at the source |
+| **Shed *smoothly*, not as a step function** | Uber replaced fixed thresholds with a **PID controller**: *"Without PID regulation, shedding acts like a hammer: reactive and abrupt. With it, it's more like a dimmer switch."* The payoff was **fewer 429s** overall, because premature shedding (which caused the retries that caused the overload) largely disappeared |
+| **Fail fast, don't block** | *"Rejecting early is almost always better than holding requests in memory until they expire. It reduces wasted work, keeps latencies predictable, prevents OOMs."* A 429 in 2 ms is a better citizen than a 200 in 30 s |
+
+**The measured result of moving from token-bucket limiting to PID-based priority-aware shedding:**
+
+| Metric | Before | After |
+|---|---|---|
+| Throughput under overload | 3,000 QPS | **5,400 QPS (+80%)** |
+| p99 latency (upsert) | 3.1 s | **1.0 s (−70%)** |
+| Goroutines at peak | 150,000 | **10,000 (−93%)** |
+| Heap | 5–6 GB spikes | **1 GB max (−60%)** |
+
+### 17.5 What to say in an interview
+
+> *"For the API surface I'd still do the standard thing — token bucket, `429` with `Retry-After` and `X-RateLimit-*` headers, fail open if the limiter itself is down. But I'd be explicit that an edge rate limiter protects a number, not a resource. Uber tried exactly that design in front of their databases and abandoned it: a Redis call per request added a SPOF in the hot path, the stateless tier couldn't track health for thousands of backend partitions, their byte-based cost model billed a full table scan the same as a single-row read, and static quotas just became a ticket queue. What replaced it was admission control **next to the state**, shedding on **in-flight concurrency** rather than QPS, with **per-request priority tiers** so background jobs get dropped before user-facing traffic. The API-level lesson I'd carry forward is to put a priority dimension in the contract from day one, and to make retry behaviour — jitter, budget, `Retry-After` — part of the published client contract rather than each caller's guess."*

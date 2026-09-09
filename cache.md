@@ -328,3 +328,29 @@ Caching is about **putting data closer to where it's used** at every layer of th
 
 Nail these and any "design X" interview involving caching becomes a structured conversation.
 
+---
+
+## 16. One Real System That Uses All of It — Uber CacheFront
+
+> **Source:** *[How Uber Serves Over 40 Million Reads Per Second from Online Storage Using an Integrated Cache](https://www.uber.com/en-US/blog/how-uber-serves-over-40-million-reads-per-second-using-an-integrated-cache/)* · **Full deep dive:** [caching.md §24](caching.md#24-real-world-case-study--uber-cachefront-40m-readssec)
+
+Every numbered item in the TL;DR above, in one production system:
+
+| This file's concept | How Uber implemented it |
+|---|---|
+| **Where the cache lives** ([§2](#2-where-caches-live--the-full-request-path)) | Not in each microservice — **inside the database's stateless query engine**, so every caller gets it with zero code change and the cache scales independently of storage |
+| **Read strategy** ([§3](#3-cache-read-strategies)) | **Cache-aside**: read Redis → stream hits immediately → fetch misses from MySQL → **asynchronously** populate Redis. Started with point reads only, which were **>50% of all queries** |
+| **TTL** ([§6](#6-cache-invalidation--one-of-the-two-hard-things-in-cs)) | Default **5 minutes** — used as a *backstop*, not the mechanism. Lowering it would have hurt the hit rate *"without meaningfully improving consistency guarantees"* |
+| **Invalidation** ([§6](#6-cache-invalidation--one-of-the-two-hard-things-in-cs)) | **Event-driven via CDC**: *Flux* tails the **MySQL binlog** and invalidates/upserts affected rows. Cache converges **within seconds**. Reading the binlog also means uncommitted transactions can never pollute the cache |
+| **Consistency** ([§7](#7-cache-consistency-models)) | Caching is **opt-in per database, per table, per request**. Eats **cart** → bypass (read-your-writes). Restaurant **menu** → cache. A dedicated invalidate-after-write API gives read-your-writes on point writes |
+| **The lost-update race** | The read path and the CDC consumer both write to Redis, so a slow read can overwrite newer data. Fixed with the **MySQL row timestamp as a version** + a **Lua `EVAL` script** doing compare-and-set atomically in one round trip |
+| **Cache penetration** ([§8](#8-classic-cache-problems-and-mitigations)) | **Negative caching** — rows that don't exist are stored with a special "absent" flag |
+| **Hot key / hot shard** ([§8](#8-classic-cache-problems-and-mitigations)) | One database instance maps to **many Redis clusters**, sharded by **partition key — deliberately a different scheme from the database's**. If a Redis cluster dies, its misses fan out across *all* DB shards instead of melting one |
+| **Cold start after failover** | Active-active across 2 regions. They tail the Redis write stream and replicate **keys, not values**; the remote region issues a read that misses and populates from **its own** local database. Keeps both regions warm without two competing replication paths |
+| **Redis failure** | **Sliding-window circuit breaker** per node (short-circuit a *fraction* of requests proportional to the error count) + **adaptive timeouts** tuned to the observed **P99.99** of cache latency instead of a hard-coded number |
+| **Metrics** ([§12](#12-key-metrics-to-monitor)) | Beyond hit rate: a **"compare cache"** shadow mode that mirrors reads and compares cache vs database, emitting every mismatch. Measured **99.99% consistency** |
+
+**Results:** P75 latency **−75%**, P99.9 **−67%**; one use case at **6M RPS with a 99% hit rate**, served by ~**3K Redis cores** instead of ~**60K database cores**; **40M+ cache reads/sec** in total.
+
+> ⭐ **The one line to remember:** *"Cache invalidation stops being the hard problem the moment you stop doing it in application code and start driving it from the database's committed change log."*
+

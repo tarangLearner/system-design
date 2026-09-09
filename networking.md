@@ -21,6 +21,7 @@
 | 9 | Sockets, ports, connection limits, keep-alive, connection pooling | [§9](#9-sockets-ports--connection-management) |
 | 10 | Network failure modes an architect must plan for | [§10](#10-network-failure-modes) |
 | ★ | Rapid-fire Q&A | [§11](#11-rapid-fire-qa) |
+| ★ | 🏭 **Real-world: HTTP/2+Protobuf vs HTTP/1.1+JSON measured · app-level windowing · SWIM** | [§12](#12-real-world-case-studies--protocols-in-production) |
 
 ---
 
@@ -342,3 +343,107 @@ flowchart LR
 | **Why does IP-hash load balancing fail?** | NAT/CGNAT makes thousands of users share one source IP, so they all land on one backend. |
 | **What's a grey failure?** | A dependency that's *slow*, not down. Health checks pass while users time out. Detect with latency-based checks and eject outliers. |
 | **How do you stop a retry storm?** | Exponential backoff **with jitter**, a retry budget (e.g. retries ≤ 10% of requests), circuit breakers, and never retrying non-idempotent calls blindly. |
+
+---
+
+## 12. Real-World Case Studies — protocols in production
+
+> **Sources:** Uber — *[High-performance gRPC in OpenSearch](https://www.uber.com/in/en/blog/high-performance-grpc/)* (Apr 2026) · LinkedIn — *[Northguard and Xinfra](https://www.linkedin.com/blog/engineering/infrastructure/introducing-northguard-and-xinfra)* (Jun 2025).
+
+### 12.1 HTTP/1.1 + JSON vs HTTP/2 + Protobuf — measured
+
+Uber's OpenSearch clusters spoke only **REST/JSON over HTTP/1.1**, while the rest of Uber speaks **gRPC/Protobuf over HTTP/2**. The gateway in between transpiled Protobuf→JSON and back on every request. Adding a native gRPC transport to OpenSearch removed that adaptor. The results isolate exactly what [§4](#4-http-evolution) claims about HTTP/2 and binary framing:
+
+| Workload | Metric | REST/JSON → gRPC | Change |
+|---|---|---|---|
+| Metrics ingest (Bulk) | p99 write latency | 34.1 ms → 13.6 ms | **≈ −60%** |
+| Metrics ingest (Bulk) | p50 write latency | 15.8 ms → 10.5 ms | **≈ −34%** |
+| Vector search | p50 | 83 ms → 38 ms | **≈ −53%** |
+| Vector search | p99 | 205 ms → 176 ms | **≈ −14%** |
+
+**Where the bytes went** — a 1,572-dimension vector query body:
+
+| Encoding | Request size |
+|---|---|
+| REST / JSON | **40,523 B** |
+| gRPC / Protobuf | **4,590 B** (**−88.7%**) |
+
+A `float32` is 4 bytes packed in Protobuf; as JSON text it's a dozen-plus characters that must also be parsed. Multiply by 1,572.
+
+**Two independent axes — say them separately.** Uber also benchmarked **SMILE** (binary JSON) across both transports:
+
+| Comparison | gRPC + SMILE is… |
+|---|---|
+| vs REST + JSON | **30% faster** |
+| vs gRPC + JSON | **45% faster** |
+| vs REST + SMILE | **47% faster** |
+
+> ⭐ **Say this:** *"'gRPC is faster' conflates two things. The **transport** wins from HTTP/2 — binary framing, multiplexing over one connection, header compression, no per-request handshake. The **encoding** wins separately from Protobuf vs JSON, and that win scales with payload size. Uber's data shows both: gRPC+SMILE beat gRPC+JSON by 45%, which is purely encoding, and beat REST+SMILE by 47%, which is purely transport."*
+
+**Uber's own summary of when the transport wins:** large request sizes · higher throughput at larger RPS · binary document formats. Their p99 search improved only 14% *"due to long-tail large queries"* — a reminder that serialization gains are proportional to payload size and don't fix a slow backend.
+
+**Deployment shape worth copying:** the gRPC transport ships as a **module on a different set of ports**, running alongside REST. *"Only the client-server layer differs between the REST and gRPC transports, while the internal node-to-node logic remains shared."* Two listeners, one core — so teams migrate incrementally instead of by flag day.
+
+### 12.2 Application-level flow control — reinventing the TCP window on purpose
+
+Northguard's wire protocols are a beautiful, compact illustration of everything in [§3](#3-tcp-vs-udp) and [§4](#4-http-evolution), because LinkedIn deliberately chose a different protocol shape for each traffic class:
+
+| Traffic | Protocol shape | Why |
+|---|---|---|
+| **Metadata** (`CreateTopic`, `TopicMetadata`, `SegmentMetadata`) | **Unary** — one request, one response | Low volume, request/response semantics, needs routing to a specific leader |
+| **Produce / consume / replication** | **Sessionized streaming** with **pipelining** and **windowing** | High volume, continuous, must not pay per-message protocol overhead |
+
+> *"We sessionize state to the stream to avoid protocol overhead. These protocols use **pipelining** to keep data moving and **windowing** to control how much can be pipelined at any time."*
+
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant B as Broker (segment leader)
+    P->>B: Handshake (stream ID)
+    B-->>P: Initial window size
+    loop while within window
+        P->>B: Append(streamID, seq=n, records)
+    end
+    Note over B: Only acks COMMITTED records
+    B-->>P: Ack(ackNum, updated window)
+    Note over P,B: M acks for N appends —<br/>acks are batched, not 1:1
+```
+
+Look at what that is: **a sliding window with cumulative, batched acknowledgements over an already-reliable transport.** It's TCP's design, re-implemented one layer up — because TCP's window governs *bytes on the wire*, not *records the application has durably committed*. Only the application knows when a record has been `fsync`'d on all replicas, so only the application can safely ack it.
+
+| Detail | Networking concept it mirrors |
+|---|---|
+| Handshake establishes a stream ID and initial window | Connection setup + receive window advertisement |
+| Producer sends `Append`s with **sequence numbers** while within the window | Pipelining / in-flight bytes bounded by the window |
+| Broker sends **M acks for N appends**, each carrying an updated window | Cumulative ACK + window update ([§3](#3-tcp-vs-udp)) |
+| Consume stream is the mirror image with the **client** choosing the window | Receiver-driven flow control — the consumer sets its own backpressure |
+| Sealed-segment replication **is literally the consume protocol between two brokers** | Protocol reuse — one implementation, three uses |
+
+> ⭐ **Say this:** *"Reliable transport is not the same as application-level flow control. TCP guarantees the bytes arrive; it can't tell the sender that the receiver has durably committed them, or slow the sender down when the receiver's disk is the bottleneck. That's why every serious streaming protocol — gRPC, HTTP/2, Kafka, Northguard — re-implements windowing above the transport."*
+
+### 12.3 Failure detection over the network — SWIM instead of centralised heartbeats
+
+Kafka's brokers heartbeat to a **single controller**; that's a centralised membership design whose cost grows with cluster size ([§10](#10-network-failure-modes)). Northguard uses **SWIM** gossip instead:
+
+| SWIM component | Behaviour |
+|---|---|
+| **Failure detection** | **Random probing** — each node periodically probes a random peer, with indirect probes through other members before declaring it dead |
+| **Dissemination** | **Infection-style** (epidemic) broadcast of membership changes — converges without a coordinator |
+| **Payload kept deliberately tiny** | Only broker host, port and attributes, plus each metadata shard's hash-ring boundaries, leader, term and replicas |
+
+Why the small payload matters: gossip cost is a function of message size × fanout × frequency. Keeping *"minimal global state"* is what lets the protocol scale to thousands of nodes — and it's still enough to **route a client request to the correct leader**, since any broker can act as a proxy using its gossipped view.
+
+### 12.4 Kernel bypass at the storage layer — Direct I/O
+
+Northguard's storage engine uses **Direct I/O** rather than relying on the OS page cache:
+
+| Benefit | Explanation |
+|---|---|
+| **No double buffering** | Data isn't held in both the page cache and the application's own buffers |
+| **Application-level caching that actually knows the access pattern** | The broker knows which **consume streams** are active, so it caches what will genuinely be read next — the kernel can only guess |
+| **Consistent state across `fsync` failures** | Improves durability, because a failed `fsync` doesn't leave dirty pages in an ambiguous state |
+| **No page-cache pollution** | Replicas nobody is consuming from, and long historical catch-up reads, no longer evict hot data |
+
+This is the same class of argument as **connection pooling** or **TLS session resumption**: the generic OS/protocol default is tuned for the average case, and a system that knows its own access pattern can beat it — but only if it's willing to own the complexity.
+
+> ⭐ **Say this:** *"Bypassing a generic layer — the page cache, the kernel network stack, a managed load balancer — is only justified when you have information the generic layer doesn't. Northguard bypasses the page cache because it knows which consume streams are active; that's a real information advantage. Bypassing without that advantage just means reimplementing something worse."*
