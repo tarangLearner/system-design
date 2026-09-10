@@ -25,6 +25,8 @@ Your existing notes already cover half the substrate:
 
 **Case studies + interview Q&A:** [ai-company-engineering-blogs.md](ai-company-engineering-blogs.md) — LinkedIn and Uber's production AI systems broken down into answerable form (retrieval funnels, distillation, GPU efficiency, LLM-as-judge, agents).
 
+**Agents, precisely:** [ai-agent-vs-agentic-ai.md](ai-agent-vs-agentic-ai.md) — the autonomy ladder (prompt → workflow → agent → multi-agent), workflow vs agent, orchestration patterns, failure modes, the cost/reliability math, and when *not* to go agentic.
+
 **Do not restart your career at zero. Position as: "senior engineer who ships reliable LLM systems."** That is scarcer and better paid than "junior AI person."
 
 ---

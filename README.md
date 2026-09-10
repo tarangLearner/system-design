@@ -90,6 +90,7 @@ flowchart TD
 | D3 | OpenMP shared-memory parallelism | [openmp-shared-memory-hpc.md](openmp-shared-memory-hpc.md) |
 | D4 | Switching into AI: curriculum, gap list, project path | [ai-engineer-roadmap.md](ai-engineer-roadmap.md) |
 | D5 | **AI system design from LinkedIn + Uber engineering blogs** — retrieval funnels, distillation, GPU efficiency, agents, + Q&A bank | [ai-company-engineering-blogs.md](ai-company-engineering-blogs.md) |
+| D6 | **AI agent vs agentic AI** — the autonomy ladder, workflow vs agent, orchestration, failure modes, cost math, when *not* to go agentic | [ai-agent-vs-agentic-ai.md](ai-agent-vs-agentic-ai.md) |
 
 ### 🟠 Track E — Frontend System Design
 
