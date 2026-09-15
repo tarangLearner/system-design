@@ -54,6 +54,7 @@ flowchart TD
 | A4 | Latency, throughput, bandwidth, availability, tail latency, back-of-envelope math | [latency.md](latency.md) | ✅ |
 | A5 | Load balancers: L4 vs L7, algorithms, health checks, sticky sessions | [load-balancer.md](load-balancer.md) | ✅ |
 | A6 | Caching: layers, strategies, TTL, eviction, stampede/penetration/avalanche | [caching.md](caching.md) · [cache.md](cache.md) | ✅ |
+| A6b | **CDN & the edge**: edge caching, cache keys, origin shielding, geo-performance, cache purge | [cdn-edge.md](cdn-edge.md) | ✅ |
 | A7 | Databases: ACID, SQL vs NoSQL, indexing, sharding, replication, scaling | [databases.md](databases.md) | ✅ |
 | A8 | APIs: REST design, idempotency, pagination, versioning, rate limiting, gateways | [rest-api.md](rest-api.md) | ✅ |
 | A9 | API styles compared: REST vs GraphQL vs RPC/gRPC | [restvsgraphqlVsRPC.md](restvsgraphqlVsRPC.md) | ✅ |
@@ -171,7 +172,7 @@ mindmap
 | "writes are slow" | Batch, async queue, write-behind, shard | [databases.md](databases.md) |
 | "one table is too big" | Sharding + consistent hashing | [databases.md](databases.md) |
 | "spiky traffic" | Queue for buffering + autoscale + load shedding | [distributed-systems.md](distributed-systems.md) |
-| "users are global" | CDN + GSLB/anycast + regional replicas | [DNS.md](DNS.md) · [load-balancer.md](load-balancer.md) |
+| "users are global" | CDN + GSLB/anycast + regional replicas | [cdn-edge.md](cdn-edge.md) · [DNS.md](DNS.md) · [load-balancer.md](load-balancer.md) |
 | "must not lose data" | Durable queue + WAL + replication + idempotency | [databases.md](databases.md) |
 | "real time updates" | WebSocket / SSE / long polling | [networking.md](networking.md) |
 | "prevent abuse" | Rate limiting + auth + WAF | [rest-api.md](rest-api.md) |

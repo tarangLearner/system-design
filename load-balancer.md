@@ -275,7 +275,7 @@ flowchart TD
 | **Ingress Controller** (K8s) | 7 | Map external traffic → cluster Services | Usually *is* NGINX/Envoy/Traefik under the hood | "Kubernetes" |
 | **Service Mesh sidecar** (Envoy/Istio, Linkerd) | 4+7 | Balance **east-west** (service↔service) | mTLS, retries, circuit breaking, tracing, per-request LB | "internal service calls", "zero trust", "gRPC" |
 | **GSLB / DNS LB** (Route 53, NS1, Akamai) | DNS | Pick a **region/DC** | Geo, latency, weighted, failover routing | "multi-region", "disaster recovery" |
-| **CDN** (CloudFront, Cloudflare) | 7 + edge | Serve/cache at the edge | Anycast, DDoS, TLS at edge, edge compute | "global users", "static assets" |
+| **CDN** (CloudFront, Cloudflare) | 7 + edge | Serve/cache at the edge | Anycast, DDoS, TLS at edge, edge compute | "global users", "static assets" → [cdn-edge.md](cdn-edge.md) |
 
 > **Principal-level framing:** *"These are not competing choices — they're layers of a funnel. In a mature system a single request can traverse: anycast edge → DDoS scrubbing → CDN → GSLB decision → regional L4 LB → L7 LB/ingress → sidecar → process. Each layer exists because it owns a different failure domain and a different unit of decision: DNS picks a region, L4 picks a machine, L7 picks a request handler, the mesh picks a peer. Collapsing layers reduces latency and cost but couples failure domains."*
 

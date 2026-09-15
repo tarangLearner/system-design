@@ -52,6 +52,7 @@ Client ──► DNS ──► CDN ──► Load Balancer ──► API Gateway
 - Serves static (and increasingly dynamic) content close to the user.
 - Reduces latency and offloads origin.
 - Cache keys typically include URL + query string + (sometimes) headers/cookies.
+- 📡 Deep dive: **[cdn-edge.md](cdn-edge.md)** — edge caching, cache keys, origin shielding, geo-performance, cache purge.
 
 ### 2.4 Load Balancer / Reverse Proxy Cache
 - Nginx, HAProxy, Varnish sitting in front of app servers.

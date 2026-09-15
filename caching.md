@@ -22,7 +22,7 @@
 | | Cache invalidation challenges | [§11](#11-cache-invalidation--the-most-annoying-part-of-caching), [§8.1.7](#817-the-three-failure-modes-this-is-where-interviews-go-deep) |
 | **2** | Browser caching (HTTP headers, ETag, 304) | [§6.1](#61-browser--http-caching--the-headers-interviewers-ask-about) |
 | | Browser **storage APIs** (localStorage / sessionStorage / cookies / IndexedDB) | [§6.2](#62-browser-storage-apis--where-the-data-physically-goes) |
-| | CDN caching | [§6](#6-caching-layers-architecture), [§6.1](#61-browser--http-caching--the-headers-interviewers-ask-about), [§15.3](#153-cdn-vs-redis--they-are-not-the-same-thing) |
+| | CDN caching | [§6](#6-caching-layers-architecture), [§6.1](#61-browser--http-caching--the-headers-interviewers-ask-about), [§15.3](#153-cdn-vs-redis--they-are-not-the-same-thing) · **deep dive → [cdn-edge.md](cdn-edge.md)** |
 | | Application-level caching · local vs distributed | [§6](#6-caching-layers-architecture), [§7](#7-local-cache-vs-distributed-cache) |
 | | Distributed caches · Redis | [§7](#7-local-cache-vs-distributed-cache), [§15.1](#151-redis-deep-dive), [§15.2](#152-redis-vs-memcached) |
 | | Speed vs consistency vs scalability trade-offs | [§4](#4-latency-hierarchy-relative-not-absolute), [§7](#7-local-cache-vs-distributed-cache), [§12](#12-consistency--the-real-cost) |
@@ -394,6 +394,8 @@ flowchart TD
 | **Purge by tag / surrogate key** | Invalidate a whole group ("all pages showing product 42") |
 | **Cache busting via fingerprinted filename** (`app.9f3c1a.js`) ⭐ | **Preferred** — a new deploy produces a new URL, so nothing ever needs purging. Pair with `max-age=31536000, immutable` |
 | **TTL expiry** | Simplest; just wait |
+
+> 📡 **Full CDN deep dive** — edge caching, cache-key normalisation, origin shielding, geo-performance and purge strategies: **[cdn-edge.md](cdn-edge.md)**.
 
 ### 6.2 Browser Storage APIs — where the data physically goes
 
@@ -1635,6 +1637,8 @@ Redis is the default distributed cache because it is an in-memory **data-structu
 - **Database / S3** remains the **source of truth**
 
 > **Quick rule to recall in an interview:** multimedia + CSS/JS → **CDN**. Configuration + application data → **Redis**.
+
+> 📡 Everything CDN-specific — edge caching, cache keys, origin shielding, geo-performance, cache purge — lives in **[cdn-edge.md](cdn-edge.md)**.
 
 ---
 
