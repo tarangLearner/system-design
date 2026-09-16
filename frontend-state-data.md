@@ -368,6 +368,8 @@ Three tabs of the same app is a tiny distributed system.
 
 > ⭐ **Say this:** *"I'd keep the access token in memory and the refresh token in an `HttpOnly`, `Secure`, `SameSite` cookie. Putting a token in `localStorage` means any successful XSS — including from a compromised npm dependency — is a full account takeover, and 'we'll just prevent XSS' isn't a control."*
 
+> 📘 **Backend counterpart:** cookie attributes, session vs JWT, refresh-token rotation and the BFF pattern → [stateless-services-sessions-tokens.md](stateless-services-sessions-tokens.md)
+
 ### 11.2 The rest of the front-end security checklist
 
 | Risk | Control |

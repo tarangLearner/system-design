@@ -2,7 +2,7 @@
 
 > **Purpose:** Everything asked in concurrency rounds and in the "make it thread-safe" half of LLD rounds.
 > **Sources:** [awesome-low-level-design](https://github.com/ashishps1/awesome-low-level-design) (concurrency track) · Java Concurrency in Practice · The Little Book of Semaphores
-> **Companions:** [low-level-design.md](low-level-design.md) · [design-patterns.md](design-patterns.md) · [cache-aside-lld.md](cache-aside-lld.md) · [README.md](README.md)
+> **Companions:** [low-level-design.md](low-level-design.md) · [design-patterns.md](design-patterns.md) · [cache-aside-lld.md](cache-aside-lld.md) · [secure-reliable-systems.md §10.3](secure-reliable-systems.md#103-simplicity-tools-and-types) (sanitizers: TSan/Helgrind for races and lock-order deadlocks, Go's race detector) · [README.md](README.md)
 
 ---
 

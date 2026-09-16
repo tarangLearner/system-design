@@ -1100,6 +1100,8 @@ flowchart TD
 
 > **The line to deliver:** *"Sticky sessions are a compatibility feature for stateful applications, not a scaling strategy. My default is stateless services with session state in Redis and identity in a short-lived signed token; then the load balancer is free to optimise purely for load, and instance death costs a retry instead of a logout."*
 
+> 📘 **Go deeper:** cookies vs sessions vs tokens, JWT revocation, refresh-token rotation and the session-store capacity math → [stateless-services-sessions-tokens.md](stateless-services-sessions-tokens.md)
+
 ### 10.5 …but sometimes affinity is genuinely correct
 
 Don't be dogmatic. Name the legitimate cases:
@@ -1458,6 +1460,8 @@ flowchart LR
 ## 16. Security at the Load Balancer (OWASP-Relevant)
 
 The LB is your outermost trust boundary. Name these:
+
+> 🔐 **Go deeper:** the LB is layer 2 of a four-layer DoS defence (edge routers → network LB → application LB → caching proxies), and the mitigation control plane should **fail static** rather than open or closed — see [secure-reliable-systems.md §9](secure-reliable-systems.md#9-mitigating-denial-of-service) for defendable architecture, anycast dispersion, CAPTCHA exemption cookies and the self-inflicted retry-storm cases.
 
 | Risk | Attack | Mitigation at the LB |
 |---|---|---|

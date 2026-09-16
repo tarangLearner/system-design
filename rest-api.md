@@ -67,7 +67,7 @@ flowchart LR
     end
 ```
 
-> ⭐ **Say this:** *"Stateless doesn't mean the **system** has no state — it means the **server instance** doesn't. State goes into a shared store (Redis, the DB) or is carried by the client in a signed token. That's what lets me put N identical servers behind a load balancer and lose any of them without losing a user's session."* → [load-balancer.md](load-balancer.md) §10
+> ⭐ **Say this:** *"Stateless doesn't mean the **system** has no state — it means the **server instance** doesn't. State goes into a shared store (Redis, the DB) or is carried by the client in a signed token. That's what lets me put N identical servers behind a load balancer and lose any of them without losing a user's session."* → [load-balancer.md](load-balancer.md) §10 · full treatment in [stateless-services-sessions-tokens.md](stateless-services-sessions-tokens.md)
 
 ### Richardson Maturity Model
 
@@ -465,6 +465,8 @@ header.payload.signature      e.g. { "sub": "42", "exp": 1772582400, "scope": "o
 
 **Baseline controls for every API:**
 HTTPS/TLS 1.2+ only with HSTS · validate and allow-list all input · parameterised queries (no string-concatenated SQL) · least privilege · secrets in a vault, never in code or URLs · security headers (`X-Content-Type-Options`, `Content-Security-Policy`, `X-Frame-Options`) · explicit CORS origin allow-list (never `*` with credentials) · audit logging with a trace ID · **never log tokens, passwords or PII**.
+
+> ⭐ **The senior version of this list:** a guideline that every developer must remember is not a scalable control. Push each of these into the **framework** so the vulnerable form is impossible to express — `TrustedSqlString` for injection, `SafeHtml` for XSS, an RPC interceptor for authN/authZ/audit, a single debug flag that deployment automation guarantees is off in production. See [secure-reliable-systems.md §10](secure-reliable-systems.md#10-writing-and-testing-code), and [§5.3](secure-reliable-systems.md#53-trusted-computing-base-tcb-and-security-boundaries) for why splitting services *and* web origins is what actually contains BOLA/IDOR blast radius.
 
 ---
 

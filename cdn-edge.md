@@ -213,6 +213,8 @@ If an **unkeyed** input can still change the cached response (an unkeyed header 
 
 **Defences:** never reflect unkeyed input into a cacheable response · keep the key and the response's true inputs identical · `private`/`no-store` on anything user-specific · strip untrusted hop-by-hop headers at the edge. See also [caching.md §16.2](caching.md#162-cache-security--three-risks-to-name).
 
+> 🔐 The edge is also where DoS defence is cheapest — dropping attack traffic at the PoP conserves both bandwidth and backend CPU, and **anycast** structurally prevents a distributed attack from focusing on one datacentre. See [secure-reliable-systems.md §9.2](secure-reliable-systems.md#92-defendable-architecture).
+
 ---
 
 ## 4. Origin Shielding (Tiered Caching)

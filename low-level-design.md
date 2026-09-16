@@ -2,7 +2,7 @@
 
 > **Purpose:** Zero → interview-ready for LLD / OOD / machine-coding rounds.
 > **Sources:** [awesome-low-level-design](https://github.com/ashishps1/awesome-low-level-design) · Head First Design Patterns · Clean Code · Refactoring (Fowler) · Effective Java
-> **Companions:** [design-patterns.md](design-patterns.md) (all 23 GoF patterns) · [cache-aside-lld.md](cache-aside-lld.md) (a complete worked LLD) · [concurrency.md](concurrency.md) · [README.md](README.md)
+> **Companions:** [design-patterns.md](design-patterns.md) (all 23 GoF patterns) · [cache-aside-lld.md](cache-aside-lld.md) (a complete worked LLD) · [concurrency.md](concurrency.md) · [secure-reliable-systems.md §10](secure-reliable-systems.md#10-writing-and-testing-code) (safe-by-construction types, YAGNI, nesting, refactoring rules) · [README.md](README.md)
 
 ---
 

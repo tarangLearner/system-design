@@ -2,7 +2,7 @@
 
 > **Purpose:** the coordination, messaging and resilience primitives that turn "a few servers" into a system that survives production.
 > **Sources:** [awesome-system-design-resources](https://github.com/ashishps1/awesome-system-design-resources) · Designing Data-Intensive Applications · Amazon Builders' Library · Paxos / Raft / Dynamo / Kafka / Chubby papers · Kleppmann on distributed locking
-> **Companions:** [databases.md](databases.md) · [cloud-native.md](cloud-native.md) · [load-balancer.md](load-balancer.md) · [concurrency.md](concurrency.md) · [README.md](README.md)
+> **Companions:** [databases.md](databases.md) · [cloud-native.md](cloud-native.md) · [load-balancer.md](load-balancer.md) · [concurrency.md](concurrency.md) · [secure-reliable-systems.md](secure-reliable-systems.md) (the same primitives under an *adversary*: blast radius, failure domains, controlled degradation, recovery) · [README.md](README.md)
 
 ---
 

@@ -6,7 +6,7 @@
 >
 > **Structure of every note in this repo:** *concept → diagram → concrete example → failure mode → what to say in the interview.*
 >
-> **Curated from:** [awesome-system-design-resources](https://github.com/ashishps1/awesome-system-design-resources) · [awesome-low-level-design](https://github.com/ashishps1/awesome-low-level-design) · ByteByteGo · Hello Interview · AlgoMaster · Amazon Builders' Library · freeCodeCamp — plus published engineering blogs from **Uber, LinkedIn, Airbnb, Netflix, Shopify, Figma, Discord and Vercel** ([§6](#6-real-world-case-study-index)).
+> **Curated from:** [awesome-system-design-resources](https://github.com/ashishps1/awesome-system-design-resources) · [awesome-low-level-design](https://github.com/ashishps1/awesome-low-level-design) · ByteByteGo · Hello Interview · AlgoMaster · Amazon Builders' Library · freeCodeCamp · Google's [*Building Secure and Reliable Systems*](https://google.github.io/building-secure-and-reliable-systems/raw/toc.html) — plus published engineering blogs from **Uber, LinkedIn, Airbnb, Netflix, Shopify, Figma, Discord and Vercel** ([§6](#6-real-world-case-study-index)).
 
 ---
 
@@ -49,6 +49,7 @@ flowchart TD
 | # | Topic | File | Status |
 |---|---|---|---|
 | A1 | Core concepts: scalability, availability, reliability, SPOF, CAP, PACELC, consistency models | [high-level-system-design-cocept.md](high-level-system-design-cocept.md) | ✅ |
+| A1b | **Stateless services & where state lives**: HTTP statelessness · cookies · sessions · JWT · refresh tokens · OAuth/OIDC · server-side vs client-side state | [stateless-services-sessions-tokens.md](stateless-services-sessions-tokens.md) | ✅ |
 | A2 | Networking: OSI, IP, TCP vs UDP, HTTP/1.1→3, WebSockets, proxies | [networking.md](networking.md) | ✅ |
 | A3 | DNS end-to-end: resolution, record types, TTL, GSLB, anycast | [DNS.md](DNS.md) | ✅ |
 | A4 | Latency, throughput, bandwidth, availability, tail latency, back-of-envelope math | [latency.md](latency.md) | ✅ |
@@ -62,6 +63,7 @@ flowchart TD
 | A11 | Distributed primitives: heartbeats, service discovery, consensus, locking, gossip, circuit breaker | [distributed-systems.md](distributed-systems.md) | ✅ |
 | A12 | Cloud native: microservices, containers, K8s, DevOps, observability | [cloud-native.md](cloud-native.md) | ✅ |
 | A13 | Full course walkthrough: auth, authz, API security, big data, production | [system-design-course-fcc.md](system-design-course-fcc.md) | ✅ |
+| A13b | **Security × reliability** (Google's *Building Secure and Reliable Systems*): adversaries · least privilege & zero trust · TCBs · resilience & blast radius · recovery & rollback · DoS · supply chain · crisis management | [secure-reliable-systems.md](secure-reliable-systems.md) | ✅ |
 | A14 | **The interview itself**: framework, capacity math, 40+ problems, trade-offs | [system-design-interview-playbook.md](system-design-interview-playbook.md) | ✅ |
 
 ### 🔵 Track B — Low Level Design (LLD)
@@ -176,6 +178,11 @@ mindmap
 | "must not lose data" | Durable queue + WAL + replication + idempotency | [databases.md](databases.md) |
 | "real time updates" | WebSocket / SSE / long polling | [networking.md](networking.md) |
 | "prevent abuse" | Rate limiting + auth + WAF | [rest-api.md](rest-api.md) |
+| "what if someone is *attacking* it?" | Threat model → least privilege → shrink the TCB → blast radius → graceful degradation | [secure-reliable-systems.md](secure-reliable-systems.md) |
+| "how do you know the binary in prod is yours?" | Mandatory review + CI-only builds + binary provenance + a deployment chokepoint | [secure-reliable-systems.md](secure-reliable-systems.md) |
+| "the fix reintroduces an old CVE" | Deny list + **MASVN** floor, raised one release *after* the patch proves stable | [secure-reliable-systems.md](secure-reliable-systems.md) |
+| "how do users stay logged in across 50 servers?" | Stateless app tier + session store **or** a short signed token | [stateless-services-sessions-tokens.md](stateless-services-sessions-tokens.md) |
+| "should this live on the client or the server?" | Size, sensitivity, cross-device, trust — then sign anything the client holds | [stateless-services-sessions-tokens.md](stateless-services-sessions-tokens.md) |
 | "one slow service kills everything" | Timeout + retry budget + circuit breaker + bulkhead | [distributed-systems.md](distributed-systems.md) |
 | "design the classes for X" | Requirements → entities → relationships → patterns | [low-level-design.md](low-level-design.md) |
 | "multiple threads touch it" | Immutability first, then the smallest lock | [concurrency.md](concurrency.md) |
@@ -218,6 +225,26 @@ Tick these off. If you can't explain one **out loud in 60 seconds**, you're not 
 </details>
 
 <details>
+<summary><b>State, sessions & auth</b></summary>
+
+- [ ] "Stateless" in one sentence — and why it's about the *instance*, not the system
+- [ ] Why HTTP was designed stateless, and what cookies were invented to fix
+- [ ] Stateless *protocol* vs stateless *service* vs stateless *architecture* (HTTP vs TCP vs your app)
+- [ ] REST's **application state vs resource state** — the answer to "if REST is stateless, how do you have sessions?"
+- [ ] Cookie vs session vs token, and why the first is a *transport* and the other two are *strategies*
+- [ ] The four cookie attributes you'd never ship without, and what `__Host-` buys you
+- [ ] JWT anatomy — and why the payload is readable by anyone holding it
+- [ ] The four ways to revoke a JWT, and why each one reintroduces state
+- [ ] Access token vs refresh token, rotation, and reuse detection
+- [ ] Where to store a token in a browser: the XSS vs CSRF trade-off
+- [ ] OAuth 2.0 vs OIDC vs SAML vs SSO — one sentence each
+- [ ] What PKCE and `state` each prevent
+- [ ] The JWT bandwidth tax at 100 K RPS, as a number
+- [ ] Which services are *legitimately* stateful, and how you contain that
+
+</details>
+
+<details>
 <summary><b>Data</b></summary>
 
 - [ ] ACID, each letter, with a failure example
@@ -238,6 +265,26 @@ Tick these off. If you can't explain one **out loud in 60 seconds**, you're not 
 - [ ] Eviction (memory pressure) vs TTL (staleness) — different problems
 - [ ] What happens the moment your cache is 100% cold
 - [ ] Hot key mitigation
+
+</details>
+
+<details>
+<summary><b>Security × reliability</b></summary>
+
+- [ ] Why security and reliability are "the same problem, one adversary apart"
+- [ ] Fail **safe/open** vs fail **secure/closed** — and what "fail **static**" means
+- [ ] CIA triad, with a *non-adversarial* failure example for each letter
+- [ ] Least privilege vs zero trust vs zero touch, one sentence each
+- [ ] Why a large admin API (POSIX over SSH) can't be audited or least-privileged
+- [ ] What a **TCB** is, and how an EUC ticket shrinks it
+- [ ] Blast-radius separation by **role, location, time**
+- [ ] High-capacity vs high-availability vs low-dependency components
+- [ ] Load shedding vs throttling — and why crashing is the worst outcome
+- [ ] Why rollback is a security *and* reliability decision (deny lists, MASVN, key rotation)
+- [ ] Why wall-clock expiry is an anti-pattern in recovery paths
+- [ ] Breakglass: the five rules that keep it from becoming a backdoor
+- [ ] "Verify artifacts, not just people" — provenance, hermetic builds, chokepoints
+- [ ] Exponential backoff **with jitter**, and the ~30× DNS retry storm
 
 </details>
 

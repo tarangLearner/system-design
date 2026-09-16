@@ -1013,6 +1013,8 @@ Because the HTTP status is always 200, you must carry the real status/code **ins
 ## 12. Authentication
 
 > **AuthN answers: "WHO are you?"** — it verifies that the user or service is who they claim to be.
+>
+> 📘 **Companion deep dive:** [stateless-services-sessions-tokens.md](stateless-services-sessions-tokens.md) — cookie attributes, JWT attacks, refresh-token rotation, PKCE, browser storage and the session-store capacity math.
 
 ### 12.0 The confusion the video sets out to fix ⭐
 
@@ -1405,6 +1407,8 @@ Every request carries the token to the backend, which **checks its validity and 
 ## 14. API Security — 7 Techniques
 
 > "APIs are doors into your system. Leave them unprotected and attackers walk right in."
+>
+> 🔐 **Companion deep dive:** these seven techniques are the *controls*. For the design principles underneath them — threat modelling, least privilege and zero trust, trusted computing bases, blast-radius containment, graceful degradation under attack, and the software supply chain — see [secure-reliable-systems.md](secure-reliable-systems.md).
 
 ### 1️⃣ Rate Limiting
 

@@ -2,7 +2,7 @@
 
 Source video: ByteByteGo (What is Cloud Native?)
 
-> **Related notes in this repo:** [distributed-systems.md](distributed-systems.md) (service discovery, consensus, resilience patterns, observability) · [high-level-system-design-cocept.md](high-level-system-design-cocept.md) (architectural patterns) · [networking.md](networking.md) · [databases.md](databases.md) · [system-design-interview-playbook.md](system-design-interview-playbook.md) · [README.md](README.md)
+> **Related notes in this repo:** [distributed-systems.md](distributed-systems.md) (service discovery, consensus, resilience patterns, observability) · [high-level-system-design-cocept.md](high-level-system-design-cocept.md) (architectural patterns) · [networking.md](networking.md) · [databases.md](databases.md) · [secure-reliable-systems.md §11](secure-reliable-systems.md#11-deploying-code--the-software-supply-chain) (hardening the CI/CD pipeline itself: binary provenance, hermetic builds, deployment chokepoints) · [system-design-interview-playbook.md](system-design-interview-playbook.md) · [README.md](README.md)
 
 ## 1. Core Message of the Video
 

@@ -20,7 +20,7 @@ low level system design - its more about coding, how coding is going to happen
 
 > **Purpose:** the 10 points above are the right instincts. This section turns each into the vocabulary, math and trade-offs an interviewer expects.
 > **Sources:** [awesome-system-design-resources](https://github.com/ashishps1/awesome-system-design-resources) · [30 System Design Concepts](https://blog.algomaster.io/p/30-system-design-concepts) · Designing Data-Intensive Applications · Google SRE Book
-> **Companions:** [system-design-interview-playbook.md](system-design-interview-playbook.md) · [databases.md](databases.md) · [distributed-systems.md](distributed-systems.md) · [load-balancer.md](load-balancer.md) · [README.md](README.md)
+> **Companions:** [system-design-interview-playbook.md](system-design-interview-playbook.md) · [databases.md](databases.md) · [distributed-systems.md](distributed-systems.md) · [load-balancer.md](load-balancer.md) · [secure-reliable-systems.md](secure-reliable-systems.md) (reliability and security as *emergent properties* — the design-doc checklist, and every place the two conflict) · [README.md](README.md)
 
 ---
 
@@ -102,6 +102,8 @@ Horizontal scaling only works if any server can serve any request:
 | Sticky sessions required | Any server, any request |
 
 ⚠️ **Sticky sessions are a workaround, not a design.** They break autoscaling (scale-in kills sessions), skew load, and complicate deploys. → [load-balancer.md](load-balancer.md) §10
+
+> 📘 **Full deep dive —** cookies vs sessions vs tokens, JWT internals and revocation, refresh-token rotation, OAuth/OIDC, and the server-side vs client-side state decision: [stateless-services-sessions-tokens.md](stateless-services-sessions-tokens.md)
 
 ### Autoscaling
 
